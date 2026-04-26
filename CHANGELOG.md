@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.1] — unreleased — auto-tuned per-user sim threshold
+
+Cross-corpus benchmark in v0.3.0 showed the global `sim ≥ 0.5` cliff
+doesn't generalize. v0.3.1 ships per-user tuning: each install computes
+its own empirical sim threshold from local prefix-LOO, refreshed
+automatically from the Stop hook when stale.
+
+### Added
+
+- `internal/health` — package that computes per-user predictor health
+  via prefix-LOO. Finds the cliff threshold where kNN starts beating
+  bucket fallback by ≥30% (per-window) AND continues to beat by ≥15%
+  (aggregate above threshold). Persisted to `~/.claude/hindcast/health.json`.
+- `hindcast tune [--warmup N] [-v]` — runs the cliff-finding algorithm
+  manually. Reports tuned threshold, kNN MALR at threshold, and the
+  per-sim-bucket breakdown. Writes health.json.
+- `hindcast show --health` — displays the persisted tuned state.
+- Auto-tune from Stop hook: if `health.json` is older than 1 hour, the
+  Stop hook spawns a goroutine that recomputes health and saves. No
+  user intervention required. Cheap (~500ms over thousands of records),
+  runs at most once per hour, doesn't block the hook.
+
+### Not yet wired (deferred, intentional)
+
+- The tuned threshold is computed and persisted but NOT currently used
+  to gate text injection. v0.3.0 shipped status-line-only by default;
+  re-enabling injection based on tuned threshold is a separate explicit
+  decision (would re-introduce the anchoring channel under controlled
+  conditions). Future iteration may add an opt-in toggle once the tuned
+  values prove stable across users in the wild.
+
 ## [0.3.0] — unreleased — cross-corpus benchmark + honest reframe
 
 ### The investigation

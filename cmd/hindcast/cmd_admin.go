@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/justinstimatze/hindcast/internal/health"
 	"github.com/justinstimatze/hindcast/internal/hook"
 	"github.com/justinstimatze/hindcast/internal/store"
 )
@@ -39,10 +40,15 @@ func cmdShow(args []string) {
 	project := fl.String("project", "", "scope to a single project (by name or hash)")
 	limit := fl.Int("n", 10, "show last N records per project")
 	accuracy := fl.Bool("accuracy", false, "report predictor MALR vs actual from accuracy.jsonl")
+	healthFlag := fl.Bool("health", false, "report tuned predictor state from health.json")
 	_ = fl.Parse(args)
 
 	if *accuracy {
 		showAccuracy(*project)
+		return
+	}
+	if *healthFlag {
+		showHealth()
 		return
 	}
 
@@ -529,3 +535,38 @@ func cmdForget(args []string) {
 		hash, rebuilt)
 }
 
+
+// showHealth prints the persisted tuned predictor state — the result of
+// the last `hindcast tune` run. If never tuned, suggests running it.
+func showHealth() {
+	h, err := health.Load()
+	if err != nil {
+		fmt.Println("hindcast: no health data yet — run `hindcast tune` to compute the empirical sim cliff for your data")
+		return
+	}
+	fmt.Printf("hindcast predictor health (last tuned %s)\n\n", h.LastTunedAt)
+	fmt.Printf("  predictions analyzed: %d  (kNN n=%d, bucket n=%d)\n", h.NPredictions, h.NKNN, h.NBucket)
+	fmt.Printf("  bucket MALR:  %.2fx\n", h.BucketMALR)
+	fmt.Printf("  project MALR: %.2fx\n", h.GroupMALR)
+	if h.GlobalMALR > 0 {
+		fmt.Printf("  global MALR:  %.2fx\n", h.GlobalMALR)
+	}
+	fmt.Println()
+	if math.IsInf(h.TunedSimThreshold, 1) {
+		fmt.Println("  tuned threshold: never inject (kNN does not beat bucket on your data)")
+	} else {
+		fmt.Printf("  tuned threshold: sim ≥ %.2f  →  kNN MALR %.2fx\n",
+			h.TunedSimThreshold, h.KNNMALRAtThreshold)
+	}
+	fmt.Printf("  verdict: %s\n", h.Verdict)
+	if len(h.SimBuckets) > 0 {
+		fmt.Println("\n  kNN MALR by sim bucket:")
+		fmt.Printf("    %-12s  %6s  %10s\n", "sim", "n", "wall MALR")
+		for _, b := range h.SimBuckets {
+			if b.N == 0 {
+				continue
+			}
+			fmt.Printf("    %.2f-%.2f    %6d  %9.2fx\n", b.LoSim, b.HiSim, b.N, b.WallMALR)
+		}
+	}
+}

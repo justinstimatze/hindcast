@@ -64,6 +64,8 @@ func main() {
 		cmdVerify(args[1:])
 	case "bench-cross":
 		cmdBenchCross(args[1:])
+	case "tune":
+		cmdTune(args[1:])
 
 	case "version", "--version", "-v":
 		fmt.Println("hindcast", version)
@@ -92,6 +94,8 @@ Usage:
   hindcast bench                 Offline prediction-accuracy benchmark on backfilled data.
   hindcast bench-cross           Cross-corpus benchmark vs METR HCAST / OpenHands traces.
   hindcast verify                Self-eval (prefix-LOO) on your own backfilled data.
+  hindcast tune                  Find your empirical sim cliff; write health.json.
+  hindcast show --health         Display tuned predictor state.
   hindcast calibrate             Online A/B analysis (control vs treatment, legacy).
   hindcast predict [PROMPT]      One-shot kNN prediction for a prompt (CLI).
   hindcast statusline            Render the latest session's prediction (status line).

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/justinstimatze/hindcast/internal/bm25"
+	"github.com/justinstimatze/hindcast/internal/health"
 	"github.com/justinstimatze/hindcast/internal/hook"
 	"github.com/justinstimatze/hindcast/internal/sizes"
 	"github.com/justinstimatze/hindcast/internal/store"
@@ -235,6 +236,30 @@ func doRecord(in recordInput) {
 		appendAccuracyLine(pend.ProjectHash, pend, r)
 	}
 
+	// Auto-tune: refresh predictor health if stale. Cheap (~500ms),
+	// runs at most once per hour. Replaces "user remembers to run
+	// hindcast tune" with automatic background refresh from the Stop
+	// hook (which is already async and detached). The tuned threshold
+	// can then be read by future UserPromptSubmit hooks for gating.
+	if shouldRetune() {
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					hook.Logf("record", "auto-tune PANIC %v", rec)
+				}
+			}()
+			byProject, err := loadRecordsByProjectSimple()
+			if err != nil {
+				return
+			}
+			sk, _ := store.LoadSketch()
+			h := health.Compute(byProject, sk, 20)
+			_ = h.Save()
+			hook.Logf("record", "auto-tune: threshold=%.2f knn-malr=%.2f bucket-malr=%.2f n=%d",
+				h.TunedSimThreshold, h.KNNMALRAtThreshold, h.BucketMALR, h.NPredictions)
+		}()
+	}
+
 	// Update per-session momentum tracker so next UserPromptSubmit in
 	// the same session can use recent-turn context as an additional
 	// predictor alongside the project×task bucket.
@@ -375,4 +400,51 @@ func updateSketch(r store.Record) error {
 	}
 	s.Add(r.WallSeconds, r.ClaudeActiveSeconds)
 	return s.Save()
+}
+
+// shouldRetune returns true if health.json is missing, malformed, or
+// older than the staleness threshold. Cheap stat-only check.
+func shouldRetune() bool {
+	const tuneStaleness = time.Hour
+	path, err := health.HealthPath()
+	if err != nil {
+		return false
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		return true // missing → tune
+	}
+	return time.Since(stat.ModTime()) > tuneStaleness
+}
+
+// loadRecordsByProjectSimple is the same as loadRecordsByProject from
+// cmd_verify but pulled inline so the auto-tune path doesn't depend on
+// flag-parsing code. Reads all per-project JSONLs into memory.
+func loadRecordsByProjectSimple() (map[string][]store.Record, error) {
+	projDir, err := store.ProjectsDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(projDir)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]store.Record{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) < 7 || name[len(name)-6:] != ".jsonl" {
+			continue
+		}
+		path := projDir + "/" + name
+		recs, err := store.ReadRecentRecords(path, 100000)
+		if err != nil {
+			continue
+		}
+		hash := name[:len(name)-6]
+		out[hash] = recs
+	}
+	return out, nil
 }
