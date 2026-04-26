@@ -10,8 +10,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/justinstimatze/hindcast/internal/bm25"
+	"github.com/justinstimatze/hindcast/internal/regressor"
+	"github.com/justinstimatze/hindcast/internal/store"
 )
 
 // cmdBenchCross runs hindcast's predictor logic against METR HCAST agent
@@ -206,7 +209,7 @@ func cmdBenchCross(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("hindcast bench-cross: METR HCAST corpus\n")
+	fmt.Printf("hindcast bench-cross: corpus=%s\n", *corpus)
 	fmt.Printf("  filter: model-prefix=%q  task-source=%q\n", *modelPrefix, *source)
 	fmt.Printf("  groups: %d evaluable, %d skipped (<%d runs)\n",
 		len(groups)-skippedGroups, skippedGroups, *minGroupSize)
@@ -253,6 +256,13 @@ func cmdBenchCross(args []string) {
 			fmt.Printf("  %-40s  n=%5d  knn MALR %.2fx\n", m, n, malr)
 		}
 	}
+
+	// Regressor evaluation: chronological 50/50 train/test split across the
+	// corpus. Honest holdout (no leakage from train into test). Compares
+	// regressor MALR on the held-out half against the other tiers'
+	// MALR on the same subset, so all predictors are scored on the same
+	// rows.
+	evaluateRegressorCross(runs, *corpus)
 
 	// Verdict.
 	_, knnMALR, _ := scorePredictor(rows, knnLabel)
@@ -455,6 +465,243 @@ type benchPredRow struct {
 	taskID string
 	actual float64
 	preds  map[string]float64
+}
+
+// evaluateRegressorCross trains a regressor on the chronological first
+// half of the corpus and evaluates it on the second half, then prints
+// MALR for the regressor alongside group_median and knn computed on the
+// SAME held-out rows so the comparison is apples-to-apples.
+//
+// Each (model, group_key) is treated as one "project" for training. The
+// regressor's recent-history features are computed within each group's
+// chronology — noisy when groups are short or when runs are temporally
+// independent (METR), but the model can learn to weight other features
+// when those signals are weak.
+func evaluateRegressorCross(runs []benchRun, corpus string) {
+	if len(runs) < 200 {
+		return
+	}
+
+	chrono := append([]benchRun(nil), runs...)
+	sort.Slice(chrono, func(i, j int) bool { return chrono[i].StartedAtMS < chrono[j].StartedAtMS })
+	cutIdx := len(chrono) / 2
+	cutMS := chrono[cutIdx].StartedAtMS
+
+	trainRecs := map[string][]store.Record{}
+	for _, r := range chrono[:cutIdx] {
+		key := r.Model + "\x00" + r.GroupKey
+		trainRecs[key] = append(trainRecs[key], runToRecord(r))
+	}
+
+	model, err := regressor.Train(trainRecs, 5)
+	if err != nil {
+		fmt.Printf("\nregressor cross-eval: skipped — %s (need ≥%d rows)\n",
+			err, regressor.MinTrainRecords)
+		return
+	}
+	linModel, linErr := regressor.TrainLinearFromRecords(trainRecs, 5, 1.0)
+	if linErr != nil {
+		fmt.Printf("\nregressor cross-eval: linear skipped — %s\n", linErr)
+		linModel = nil
+	}
+
+	// Per-group prefix history for the test phase. We stream records in
+	// chronological order; for each test record we already have its group's
+	// prior runs (from training-half + earlier test rows we've stepped over
+	// for index-update only). The BM25 index is built from the training
+	// half so the BM25 features the regressor sees match what it trained on.
+	idxByGroup := map[string]*bm25.Index{}
+	histByGroup := map[string][]store.Record{}
+	for _, r := range chrono[:cutIdx] {
+		key := r.Model + "\x00" + r.GroupKey
+		histByGroup[key] = append(histByGroup[key], runToRecord(r))
+		idx := idxByGroup[key]
+		if idx == nil {
+			idx = bm25.New()
+			idxByGroup[key] = idx
+		}
+		idx.Add(r.Tokens, bm25.Doc{WallSeconds: int(r.WallSeconds + 0.5)})
+	}
+
+	var rows []evalRow
+
+	// Same-group cumulative wall stats for the held-out group_median compare.
+	groupWalls := map[string][]float64{}
+	for k, recs := range histByGroup {
+		for _, r := range recs {
+			groupWalls[k] = append(groupWalls[k], float64(r.WallSeconds))
+		}
+	}
+
+	for _, r := range chrono[cutIdx:] {
+		if r.WallSeconds <= 0 {
+			continue
+		}
+		key := r.Model + "\x00" + r.GroupKey
+		idx := idxByGroup[key]
+		if idx == nil {
+			idx = bm25.New()
+			idxByGroup[key] = idx
+		}
+		// Build regressor context from this group's prior history.
+		ctx := regressor.Context{
+			PromptChars: int(estimatePromptChars(r, corpus)),
+			History:     histByGroup[key],
+		}
+		if len(r.Tokens) > 0 && len(idx.Docs) > 0 {
+			matches := idx.TopK(r.Tokens, 7)
+			var good []bm25.Match
+			for _, m := range matches {
+				if m.Sim >= 0.15 {
+					good = append(good, m)
+				}
+			}
+			if len(matches) > 0 {
+				ctx.BM25MaxSim = matches[0].Sim
+			}
+			if len(good) >= 3 {
+				ctx.BM25PredWall = predFromMatches(good)
+			}
+		}
+
+		row := evalRow{actual: r.WallSeconds}
+		row.regressor = float64(model.PredictWall(ctx))
+		if linModel != nil {
+			row.linear = float64(linModel.PredictWall(ctx))
+		}
+		if gw := groupWalls[key]; len(gw) >= 4 {
+			row.groupMed = quantile(gw, 0.5)
+		}
+		if ctx.BM25PredWall > 0 {
+			row.knn = float64(ctx.BM25PredWall)
+		}
+		row.ensemble = float64(regressor.Ensemble(int(row.regressor), int(row.knn), ctx.BM25MaxSim))
+		rows = append(rows, row)
+
+		// Update prefix state with this row.
+		histByGroup[key] = append(histByGroup[key], runToRecord(r))
+		groupWalls[key] = append(groupWalls[key], r.WallSeconds)
+		idx.Add(r.Tokens, bm25.Doc{WallSeconds: int(r.WallSeconds + 0.5)})
+	}
+
+	if len(rows) == 0 {
+		return
+	}
+
+	regMALR := malrEval(rows, func(r evalRow) float64 { return r.regressor })
+	linMALR := 0.0
+	if linModel != nil {
+		linMALR = malrEval(rows, func(r evalRow) float64 { return r.linear })
+	}
+	gmMALR := malrEval(filterEval(rows, func(r evalRow) bool { return r.groupMed > 0 }),
+		func(r evalRow) float64 { return r.groupMed })
+	knnRows := filterEval(rows, func(r evalRow) bool { return r.knn > 0 })
+	knnMALR := malrEval(knnRows, func(r evalRow) float64 { return r.knn })
+	ensMALR := malrEval(rows, func(r evalRow) float64 { return r.ensemble })
+
+	// Gap-fill check: among rows where kNN did NOT fire (no good neighbors),
+	// does the regressor beat group_median? This is the conservative
+	// integration story — leave kNN alone, plug the regressor in only
+	// where kNN abstains.
+	noKNN := filterEval(rows, func(r evalRow) bool { return r.knn <= 0 })
+	noKNNRegMALR := malrEval(noKNN, func(r evalRow) float64 { return r.regressor })
+	noKNNGmMALR := malrEval(filterEval(noKNN, func(r evalRow) bool { return r.groupMed > 0 }),
+		func(r evalRow) float64 { return r.groupMed })
+
+	fmt.Println()
+	fmt.Printf("regressor cross-eval (corpus=%s, chronological 50/50 split):\n", corpus)
+	fmt.Printf("  trained on %d records (cut @ %s)\n",
+		model.NTrain, time.UnixMilli(int64(cutMS)).UTC().Format("2006-01-02"))
+	fmt.Printf("  eval rows: %d  trees: %d  features: %d\n",
+		len(rows), len(model.Trees), len(model.FeatureNames))
+	fmt.Printf("  %-16s  %6s  %10s\n", "predictor", "n", "wall MALR")
+	fmt.Printf("  %-16s  %6d  %9.2fx  (gbdt, depth-3, 100 rounds, lr=0.10)\n", "regressor", len(rows), regMALR)
+	if linModel != nil {
+		fmt.Printf("  %-16s  %6d  %9.2fx  (ridge, λ=%.1f, in-sample MALR=%.2fx)\n",
+			"linear", len(rows), linMALR, linModel.Lambda, linModel.TrainMALR)
+	}
+	fmt.Printf("  %-16s  %6d  %9.2fx\n", "group_median", countEval(rows, func(r evalRow) bool { return r.groupMed > 0 }), gmMALR)
+	fmt.Printf("  %-16s  %6d  %9.2fx\n", "knn", len(knnRows), knnMALR)
+	fmt.Printf("  %-16s  %6d  %9.2fx  (regressor⊕kNN, blended in log-space by max_sim)\n",
+		"ensemble", len(rows), ensMALR)
+
+	fmt.Printf("\n  gap-fill (rows where kNN did NOT fire):\n")
+	fmt.Printf("    %-14s  %6d  %9.2fx\n", "regressor", len(noKNN), noKNNRegMALR)
+	fmt.Printf("    %-14s  %6d  %9.2fx\n", "group_median",
+		countEval(noKNN, func(r evalRow) bool { return r.groupMed > 0 }), noKNNGmMALR)
+}
+
+// runToRecord adapts a benchRun to a store.Record. Only fills the fields
+// the regressor's feature extraction reads — leaves ToolCalls/FilesTouched
+// nil/0 so recent-history tool features stay at zero (the model handles
+// missing-signal one-hots gracefully).
+func runToRecord(r benchRun) store.Record {
+	return store.Record{
+		TS:           time.UnixMilli(int64(r.StartedAtMS)).UTC(),
+		WallSeconds:  int(r.WallSeconds + 0.5),
+		PromptTokens: r.Tokens,
+	}
+}
+
+// estimatePromptChars approximates the prompt length feature for cross-
+// corpus eval. OpenHands has prompt text → use len. METR has only task_id
+// → use a token-count proxy (token count × 6 chars/token rough avg).
+func estimatePromptChars(r benchRun, corpus string) float64 {
+	if corpus == "openhands" {
+		// Prompt text is dropped after tokenization — approximate from
+		// token count.
+		return float64(len(r.Tokens) * 5)
+	}
+	return float64(len(r.Tokens) * 6)
+}
+
+func predFromMatches(good []bm25.Match) int {
+	return int(weightedMedianMatches(good) + 0.5)
+}
+
+type evalRow struct {
+	actual    float64
+	regressor float64
+	linear    float64
+	groupMed  float64
+	knn       float64
+	ensemble  float64
+}
+
+func malrEval(rows []evalRow, getter func(evalRow) float64) float64 {
+	abs := []float64{}
+	for _, r := range rows {
+		p := getter(r)
+		if p <= 0 || r.actual <= 0 {
+			continue
+		}
+		abs = append(abs, math.Abs(math.Log(p/r.actual)))
+	}
+	if len(abs) == 0 {
+		return 0
+	}
+	sort.Float64s(abs)
+	return math.Exp(abs[len(abs)/2])
+}
+
+func filterEval(rows []evalRow, keep func(evalRow) bool) []evalRow {
+	var out []evalRow
+	for _, r := range rows {
+		if keep(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func countEval(rows []evalRow, keep func(evalRow) bool) int {
+	n := 0
+	for _, r := range rows {
+		if keep(r) {
+			n++
+		}
+	}
+	return n
 }
 
 func scorePredictor(rows []benchPredRow, name string) (n int, malr, bias float64) {

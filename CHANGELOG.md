@@ -1,5 +1,75 @@
 # Changelog
 
+## [0.4.0] — unreleased — universal-features regressor (offline tooling)
+
+### The investigation
+
+After v0.3.1 landed per-user tuning, the open question was: can a learned
+regressor over universal features (prompt length, task type, recent
+project velocity, BM25 signals as features rather than the primary tier)
+beat the kNN tier where the kNN cliff doesn't exist?
+
+Built `internal/regressor` with two model classes (GBDT and ridge linear)
+trained on the same 21-feature vector. Extended `hindcast bench-cross` to
+evaluate both against group_median and kNN on chronological 50/50 splits
+of METR HCAST and OpenHands SWE-bench Lite.
+
+**What we found:**
+
+- **Linear beats GBDT cross-corpus.** At our sample sizes (a few thousand
+  rows), depth-3 × 100-round GBDT overfits. Ridge linear with λ=1 is more
+  robust:
+  - METR held-out: linear 1.17× vs GBDT 1.31×
+  - OpenHands held-out: linear 1.83× vs GBDT 2.03×
+- **Linear is the best predictor on OpenHands** (unique-instance regime),
+  beating group_median by 17% and kNN by 23%. This is the regime where
+  lexical overlap fails (each SWE-bench instance is one-shot) and
+  universal features add the marginal signal.
+- **Neither regressor beats kNN on the maintainer's local data.** kNN at
+  tuned-sim hits 1.47× (per `hindcast tune`); held-out GBDT 1.62×, linear
+  1.83×. The maintainer's data has enough same-project repetition that
+  kNN is hard to beat.
+- **Neither regressor beats group_median on METR** (1.07× group_median
+  vs 1.17× linear). When same-task repetition dominates, "what does this
+  task family typically take" is near-optimal; universal features can't
+  improve.
+
+### Conclusion
+
+The regressor adds value in the unique-instance regime. It does NOT
+beat kNN on data with within-project repetition. The empirical case for
+displacing kNN as the primary predictor on user data is not there.
+
+### Added
+
+- `internal/regressor` — pure-Go implementation:
+  - `gbdt.go` — gradient-boosted regression trees, depth-3, 100 rounds,
+    lr=0.1, squared-error loss on log(wall_seconds).
+  - `linear.go` — ridge regression with feature standardization, solved
+    via Gauss-Jordan with partial pivoting.
+  - `features.go` — 21-feature vector covering prompt-time signals
+    (no leakage from post-turn observations like ToolCalls/FilesTouched
+    of the current turn — those would only be available after prediction).
+  - `model.go` — train/predict/save/load via gob to
+    `~/.claude/hindcast/regressor.gob`.
+  - `Ensemble(regressorWall, knnWall, maxSim)` — log-space blend by sim.
+- `hindcast train [--warmup N] [-v]` — trains both GBDT and linear on
+  backfilled records, persists the GBDT, reports in-sample MALR for
+  both and a held-out 50/50 chronological MALR for honest comparison.
+- `hindcast bench-cross` — extended with regressor cross-eval. Reports
+  GBDT, linear, group_median, kNN, ensemble, and a "gap-fill" diagnostic
+  (regressor MALR on rows where kNN didn't fire).
+
+### Not yet wired (intentional)
+
+- `predict.Predict` is unchanged. The kNN tier remains primary.
+- The Stop hook does not auto-train. Auto-training would only be
+  worthwhile if the model fed `predict.Predict`.
+- Future direction: per-user adaptive tier selection. Extend
+  `health.Compute` to also benchmark the regressor on user data and let
+  `predict.Predict` consult health.json to pick the locally-winning tier.
+  Makes the regressor opt-in by data, not by config.
+
 ## [0.3.1] — unreleased — auto-tuned per-user sim threshold
 
 Cross-corpus benchmark in v0.3.0 showed the global `sim ≥ 0.5` cliff

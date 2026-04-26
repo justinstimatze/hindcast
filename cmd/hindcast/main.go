@@ -66,6 +66,8 @@ func main() {
 		cmdBenchCross(args[1:])
 	case "tune":
 		cmdTune(args[1:])
+	case "train":
+		cmdTrain(args[1:])
 
 	case "version", "--version", "-v":
 		fmt.Println("hindcast", version)
@@ -95,6 +97,7 @@ Usage:
   hindcast bench-cross           Cross-corpus benchmark vs METR HCAST / OpenHands traces.
   hindcast verify                Self-eval (prefix-LOO) on your own backfilled data.
   hindcast tune                  Find your empirical sim cliff; write health.json.
+  hindcast train                 Train per-user GBDT regressor on backfilled records.
   hindcast show --health         Display tuned predictor state.
   hindcast calibrate             Online A/B analysis (control vs treatment, legacy).
   hindcast predict [PROMPT]      One-shot kNN prediction for a prompt (CLI).

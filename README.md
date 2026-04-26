@@ -124,6 +124,7 @@ hindcast bench-cross [--corpus] Cross-corpus benchmark vs METR HCAST or OpenHand
 hindcast verify [--lift-min X]  Self-eval: LOO predict on your data, emit PASS/FAIL verdict.
 hindcast tune                   Find your empirical sim cliff; persist to health.json.
 hindcast show --health          Display tuned predictor state + sim-bucket MALR.
+hindcast train [--warmup N]     Train per-user GBDT + linear regressor (offline tooling).
 hindcast backfill [--rebuild]   Re-parse ~/.claude/projects/*/. Safe to re-run.
 hindcast forget <project>       Delete one project's data.
 hindcast rotate-salt            Regenerate BM25 salt; clears indexes (records kept).
@@ -158,6 +159,8 @@ Honest cross-corpus findings (~6,000 predictions across two public corpora):
 - The single-threshold gate (`sim ≥ 0.5`) tuned on the maintainer's data does NOT generalize to all corpora. v0.3.1 ships `hindcast tune` (auto-runs from the Stop hook when `health.json` is stale): each install computes its own empirical cliff via prefix-LOO and persists it. View with `hindcast show --health`. The tuned threshold is computed but not yet wired into a text-injection gate; status line stays the universal default.
 
 If your usage looks like Claude Code (multi-turn project work), expect kNN to earn its keep. If you use Claude Code for one-shot independent tasks, the bucket/project tier may be the ceiling.
+
+v0.4 added a learned regressor (`hindcast train`) over universal features (prompt length, task type, recent project velocity, BM25 signals as features) — both GBDT and ridge linear, trainable on your local data and benchmarked cross-corpus. **Empirical finding: linear regressor wins on unique-instance corpora (OpenHands +17–23% over kNN/group_median); kNN wins on dense-repetition data (maintainer's own).** The regressor is shipped as offline tooling and is NOT wired into the live predict ladder — the case for displacing kNN on data with within-project repetition isn't there yet. The natural follow-up is per-user adaptive tier selection, which is not in this release.
 
 ## Known limitations
 
