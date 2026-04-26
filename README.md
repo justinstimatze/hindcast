@@ -47,6 +47,7 @@ Fogg, *checking his pocket watch*: "Three minutes. Four minutes twelve. Satisfac
 
 A BM25-weighted k-nearest-neighbors regressor over your own project's history. Given the current prompt's hashed tokens, it finds the top-k most similar past turns and takes a similarity-weighted median of their wall / active seconds. Tiers, in order:
 
+0. **regressor (optional)** — a per-user GBDT or ridge linear model over universal features, served first ONLY when `hindcast tune` measured it to beat the ladder below by ≥15% on your 50/50 held-out split. Otherwise dormant.
 1. **kNN** — at least 3 neighbors above similarity 0.15. Returns weighted median + p25/p75 band.
 2. **task-type bucket** — records classified into the same task type (refactor / debug / feature / test / docs / other), n ≥ 4.
 3. **overall project** — any record from the same project, n ≥ 4.
@@ -160,7 +161,9 @@ Honest cross-corpus findings (~6,000 predictions across two public corpora):
 
 If your usage looks like Claude Code (multi-turn project work), expect kNN to earn its keep. If you use Claude Code for one-shot independent tasks, the bucket/project tier may be the ceiling.
 
-v0.4 added a learned regressor (`hindcast train`) over universal features (prompt length, task type, recent project velocity, BM25 signals as features) — both GBDT and ridge linear, trainable on your local data and benchmarked cross-corpus. **Empirical finding: linear regressor wins on unique-instance corpora (OpenHands +17–23% over kNN/group_median); kNN wins on dense-repetition data (maintainer's own).** The regressor is shipped as offline tooling and is NOT wired into the live predict ladder — the case for displacing kNN on data with within-project repetition isn't there yet. The natural follow-up is per-user adaptive tier selection, which is not in this release.
+v0.5 ships per-user adaptive tier selection. `hindcast tune` (and the Stop-hook auto-refresh) measures ladder/GBDT/linear on a chronological 50/50 held-out split of your own records and writes the winner to `~/.claude/hindcast/health.json`. If a regressor variant beats the existing ladder by ≥15% on your data, `predict.Predict` serves that regressor first; otherwise the kNN→bucket→project→global ladder runs unchanged. View the comparison with `hindcast show --health`.
+
+The regressor is the v0.4 universal-features design (prompt length, task type, recent project velocity, BM25 signals), but with the post-turn `SizeBucket` feature removed in v0.5 (it leaked into training but was always empty at predict time, biasing v0.4 numbers optimistic). Honest cross-corpus finding stands: **linear regressor still wins on unique-instance OpenHands at 1.83× MALR (vs 2.14× group_median, 2.27× kNN)**. On the maintainer's own data, the ladder remains the winner (1.59× vs gbdt 1.72× / linear 1.70× held-out) — adaptive selection correctly stays dormant.
 
 ## Known limitations
 

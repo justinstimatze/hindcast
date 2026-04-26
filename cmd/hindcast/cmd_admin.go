@@ -569,4 +569,17 @@ func showHealth() {
 			fmt.Printf("    %.2f-%.2f    %6d  %9.2fx\n", b.LoSim, b.HiSim, b.N, b.WallMALR)
 		}
 	}
+	if h.NHeldOut > 0 {
+		fmt.Println("\n  per-user adaptive tier (50/50 chronological held-out):")
+		fmt.Printf("    n=%d  ladder=%.2fx  gbdt=%.2fx  linear=%.2fx\n",
+			h.NHeldOut, h.LadderMALRHeldOut, h.GBDTMALRHeldOut, h.LinearMALRHeldOut)
+		switch h.RegressorWinner {
+		case "gbdt", "linear":
+			fmt.Printf("    winner: %s (lift %.2fx vs ladder) — predict path serves regressor first\n",
+				h.RegressorWinner, h.RegressorLiftVsLadder)
+		default:
+			fmt.Printf("    winner: ladder (regressor lift %.2fx — needs ≥1.18x to displace)\n",
+				h.RegressorLiftVsLadder)
+		}
+	}
 }

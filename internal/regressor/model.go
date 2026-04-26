@@ -59,8 +59,8 @@ func (m *Model) PredictWall(ctx Context) int {
 	return int(v + 0.5)
 }
 
-// ModelPath is where the per-install regressor model lives.
-func ModelPath() (string, error) {
+// GBDTModelPath is where the per-install GBDT model lives.
+func GBDTModelPath() (string, error) {
 	root, err := store.HindcastDir()
 	if err != nil {
 		return "", err
@@ -68,12 +68,12 @@ func ModelPath() (string, error) {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return "", err
 	}
-	return filepath.Join(root, "regressor.gob"), nil
+	return filepath.Join(root, "regressor.gbdt.gob"), nil
 }
 
-// Save writes the model atomically. Caller is responsible for path safety.
+// Save writes the GBDT model atomically. Caller is responsible for path safety.
 func (m *Model) Save() error {
-	path, err := ModelPath()
+	path, err := GBDTModelPath()
 	if err != nil {
 		return err
 	}
@@ -101,9 +101,9 @@ func (m *Model) Save() error {
 	return os.Rename(tmpName, path)
 }
 
-// Load returns the persisted model, or nil + error if absent / unreadable.
+// Load returns the persisted GBDT model, or nil + error if absent / unreadable.
 func Load() (*Model, error) {
-	path, err := ModelPath()
+	path, err := GBDTModelPath()
 	if err != nil {
 		return nil, err
 	}

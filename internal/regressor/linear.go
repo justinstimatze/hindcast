@@ -1,14 +1,77 @@
 package regressor
 
 import (
+	"encoding/gob"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
 	"github.com/justinstimatze/hindcast/internal/bm25"
 	"github.com/justinstimatze/hindcast/internal/store"
 )
+
+// LinearModelPath is where the per-install ridge linear model lives.
+func LinearModelPath() (string, error) {
+	root, err := store.HindcastDir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(root, 0700); err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "regressor.linear.gob"), nil
+}
+
+// Save writes the linear model atomically.
+func (m *LinearModel) Save() error {
+	path, err := LinearModelPath()
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".regressor-linear-*.gob")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() {
+		tmp.Close()
+		os.Remove(tmpName)
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		cleanup()
+		return err
+	}
+	if err := gob.NewEncoder(tmp).Encode(m); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+// LoadLinear returns the persisted linear model, or nil + error if absent.
+func LoadLinear() (*LinearModel, error) {
+	path, err := LinearModelPath()
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var m LinearModel
+	if err := gob.NewDecoder(f).Decode(&m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
 
 // LinearModel is ridge regression in log-target space over the canonical
 // feature set. Lives alongside Model (GBDT) so we can compare model
@@ -196,6 +259,59 @@ func TrainLinearFromRecords(byProject map[string][]store.Record, warmup int, lam
 	return TrainLinear(X, y, lambda)
 }
 
+// MakeContext assembles a regressor.Context with BM25-derived features
+// computed from queryHashes against idx. Both buildTrainingMatrix and the
+// production predict path call this so the at-train and at-predict
+// feature distributions match. Empty queryHashes or empty idx means the
+// BM25 fields stay zero.
+func MakeContext(promptChars int, taskType string,
+	history []store.Record, queryHashes []uint64, idx *bm25.Index) Context {
+	ctx := Context{
+		PromptChars: promptChars,
+		TaskType:    taskType,
+		History:     history,
+	}
+	if idx == nil || len(idx.Docs) == 0 || len(queryHashes) == 0 {
+		return ctx
+	}
+	matches := idx.TopK(queryHashes, 7)
+	if len(matches) == 0 {
+		return ctx
+	}
+	ctx.BM25MaxSim = matches[0].Sim
+	var good []bm25.Match
+	for _, m := range matches {
+		if m.Sim >= 0.15 {
+			good = append(good, m)
+		}
+	}
+	if len(good) >= 3 {
+		ctx.BM25PredWall = int(weightedMedianWall(good) + 0.5)
+	}
+	return ctx
+}
+
+// AddRecordToIndex adds the record's BM25 doc to idx. Mirrors what the
+// hot path does on each turn so eval/training reproduces production
+// index growth exactly.
+func AddRecordToIndex(idx *bm25.Index, r store.Record) {
+	if idx == nil || len(r.PromptTokens) == 0 {
+		return
+	}
+	tc := 0
+	for _, c := range r.ToolCalls {
+		tc += c
+	}
+	idx.Add(r.PromptTokens, bm25.Doc{
+		WallSeconds:   r.WallSeconds,
+		ActiveSeconds: r.ClaudeActiveSeconds,
+		TaskType:      r.TaskType,
+		SizeBucket:    r.SizeBucket,
+		ToolCount:     tc,
+		FilesTouched:  r.FilesTouched,
+	})
+}
+
 // buildTrainingMatrix is the shared feature-extraction pipeline used by
 // both Train (GBDT) and TrainLinearFromRecords. Pulled out so the two
 // model classes train on identical inputs.
@@ -214,44 +330,11 @@ func buildTrainingMatrix(byProject map[string][]store.Record, warmup int) ([][]f
 		idx := bm25.New()
 		for i, r := range sorted {
 			if i >= warmup && r.WallSeconds > 0 {
-				ctx := Context{
-					PromptChars: r.PromptChars,
-					TaskType:    r.TaskType,
-					SizeBucket:  r.SizeBucket,
-					History:     sorted[:i],
-				}
-				if len(r.PromptTokens) > 0 && len(idx.Docs) > 0 {
-					matches := idx.TopK(r.PromptTokens, 7)
-					var good []bm25.Match
-					for _, m := range matches {
-						if m.Sim >= 0.15 {
-							good = append(good, m)
-						}
-					}
-					if len(matches) > 0 {
-						ctx.BM25MaxSim = matches[0].Sim
-					}
-					if len(good) >= 3 {
-						ctx.BM25PredWall = int(weightedMedianWall(good) + 0.5)
-					}
-				}
+				ctx := MakeContext(r.PromptChars, r.TaskType, sorted[:i], r.PromptTokens, idx)
 				X = append(X, Extract(ctx))
 				y = append(y, math.Log(float64(r.WallSeconds)))
 			}
-			if len(r.PromptTokens) > 0 {
-				tc := 0
-				for _, c := range r.ToolCalls {
-					tc += c
-				}
-				idx.Add(r.PromptTokens, bm25.Doc{
-					WallSeconds:   r.WallSeconds,
-					ActiveSeconds: r.ClaudeActiveSeconds,
-					TaskType:      r.TaskType,
-					SizeBucket:    r.SizeBucket,
-					ToolCount:     tc,
-					FilesTouched:  r.FilesTouched,
-				})
-			}
+			AddRecordToIndex(idx, r)
 		}
 	}
 	return X, y

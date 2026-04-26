@@ -19,28 +19,31 @@ import (
 // FeatureNames is the canonical column order. Used for both training and
 // inference — feeding the model in a different order than it trained on
 // would silently corrupt predictions.
+//
+// NOTE: SizeBucket was removed in v0.4.1. It's `sizes.Classify(filesTouched,
+// toolCount)` — both post-turn observations not available at UserPromptSubmit
+// time. Earlier v0.4 trained with it populated from completed records and
+// would have served predictions with it always empty, a silent train/predict
+// distribution shift. All features below MUST be derivable at UserPromptSubmit.
 var FeatureNames = []string{
-	"log_prompt_chars",     // 0
-	"task_refactor",        // 1
-	"task_debug",           // 2
-	"task_feature",         // 3
-	"task_test",            // 4
-	"task_docs",            // 5
-	"task_other",           // 6
-	"size_small",           // 7
-	"size_medium",          // 8
-	"size_large",           // 9
-	"recent_log_p50_wall",  // 10
-	"recent_log_p75_wall",  // 11
-	"recent_p50_tools",     // 12
-	"recent_frac_bash",     // 13
-	"recent_frac_edit",     // 14
-	"recent_frac_write",    // 15
-	"recent_frac_grep",     // 16
-	"recent_frac_read",     // 17
-	"bm25_max_sim",         // 18
-	"bm25_log_knn_pred",    // 19, 0 if no kNN signal
-	"bm25_has_signal",      // 20, 1 if kNN tier fired with ≥3 good neighbors
+	"log_prompt_chars",    // 0
+	"task_refactor",       // 1
+	"task_debug",          // 2
+	"task_feature",        // 3
+	"task_test",           // 4
+	"task_docs",           // 5
+	"task_other",          // 6
+	"recent_log_p50_wall", // 7
+	"recent_log_p75_wall", // 8
+	"recent_p50_tools",    // 9
+	"recent_frac_bash",    // 10
+	"recent_frac_edit",    // 11
+	"recent_frac_write",   // 12
+	"recent_frac_grep",    // 13
+	"recent_frac_read",    // 14
+	"bm25_max_sim",        // 15
+	"bm25_log_knn_pred",   // 16, 0 if no kNN signal
+	"bm25_has_signal",     // 17, 1 if kNN tier fired with ≥3 good neighbors
 }
 
 // Context is the prompt-time state needed to derive features for one
@@ -49,7 +52,6 @@ var FeatureNames = []string{
 type Context struct {
 	PromptChars  int
 	TaskType     string
-	SizeBucket   string
 	History      []store.Record
 	BM25MaxSim   float64
 	BM25PredWall int // kNN tier prediction in seconds; 0 if not available
@@ -83,16 +85,6 @@ func Extract(ctx Context) []float64 {
 		feats[5] = 1
 	default:
 		feats[6] = 1
-	}
-
-	// Size-bucket one-hot.
-	switch ctx.SizeBucket {
-	case "small":
-		feats[7] = 1
-	case "medium":
-		feats[8] = 1
-	case "large":
-		feats[9] = 1
 	}
 
 	// Recent-history features. Take the trailing window of the project's
@@ -132,27 +124,27 @@ func Extract(ctx Context) []float64 {
 			}
 		}
 		if len(walls) > 0 {
-			feats[10] = quantile(walls, 0.5)
-			feats[11] = quantile(walls, 0.75)
+			feats[7] = quantile(walls, 0.5)
+			feats[8] = quantile(walls, 0.75)
 		}
 		if len(toolCounts) > 0 {
-			feats[12] = quantile(toolCounts, 0.5)
+			feats[9] = quantile(toolCounts, 0.5)
 		}
 		n := float64(len(recent))
-		feats[13] = float64(bashHits) / n
-		feats[14] = float64(editHits) / n
-		feats[15] = float64(writeHits) / n
-		feats[16] = float64(grepHits) / n
-		feats[17] = float64(readHits) / n
+		feats[10] = float64(bashHits) / n
+		feats[11] = float64(editHits) / n
+		feats[12] = float64(writeHits) / n
+		feats[13] = float64(grepHits) / n
+		feats[14] = float64(readHits) / n
 	}
 
 	// BM25 features. has_signal lets the model learn a different policy
 	// when the kNN tier didn't fire (it can't trust bm25_log_knn_pred=0
 	// as a real prediction).
-	feats[18] = ctx.BM25MaxSim
+	feats[15] = ctx.BM25MaxSim
 	if ctx.BM25PredWall > 0 {
-		feats[19] = math.Log(float64(ctx.BM25PredWall))
-		feats[20] = 1
+		feats[16] = math.Log(float64(ctx.BM25PredWall))
+		feats[17] = 1
 	}
 
 	return feats

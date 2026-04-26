@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.5.0] — unreleased — per-user adaptive tier selection + feature-leak fix
+
+### Headline
+
+`hindcast tune` (and Stop-hook auto-refresh) now runs a chronological 50/50
+held-out comparison of {ladder, gbdt, linear} on the user's data and writes
+the winner to `health.json`. When a regressor variant beats the kNN-led
+ladder by ≥15%, `predict.Predict` serves that regressor first. Otherwise
+the existing ladder is unchanged. The maintainer's data: ladder still
+wins (1.59× vs gbdt 1.72× / linear 1.70× held-out 50/50).
+
+### Bug fix: feature leakage
+
+v0.4 trained the regressor with `SizeBucket` (one-hot small/medium/large)
+as a feature. SizeBucket is `sizes.Classify(filesTouched, toolCount)` —
+both **post-turn** observations not available at UserPromptSubmit time.
+Trained models therefore learned to depend on a feature that would always
+be empty at production. The earlier v0.4 train/bench numbers were
+optimistically biased because eval ran with size populated from completed
+records, while production would have run with size always {0,0,0}.
+
+Fix: dropped `SizeBucket` from `features.go` (21 features → 18). All
+features now satisfy the package contract: derivable at UserPromptSubmit
+time. Training/eval/predict now share one distribution.
+
+**Honest revised numbers** (compare to v0.4 entry below):
+
+| dataset            | metric          | v0.4 (with size) | v0.5 (honest) |
+|--------------------|-----------------|------------------|---------------|
+| user 50/50 GBDT    | held-out MALR   | 1.64×            | **1.91×**     |
+| user 50/50 linear  | held-out MALR   | 1.83×            | **2.24×**     |
+| METR linear        | held-out MALR   | 1.17×            | 1.17×         |
+| OpenHands linear   | held-out MALR   | 1.83×            | **1.83×**     |
+
+Cross-corpus numbers were nearly unchanged — those corpora have stable
+within-group sizes so the feature carried little marginal information.
+User data was where the leak mattered, because per-project task-size
+distribution is heterogeneous and the model was free-riding on it.
+
+### Added
+
+- `health.Compute` now runs a 50/50 chronological eval section alongside
+  prefix-LOO. Records ladder/gbdt/linear MALR and a `RegressorWinner`
+  (`"gbdt" | "linear" | "none"`) in `health.json`.
+- `predict.SourceRegressor` source name; `cmd_pending.computePrediction`
+  short-circuits to the persisted winner model when health says so. Soft
+  falls through to the ladder on any IO/decode error.
+- `internal/regressor`: `GBDTModelPath` + `LinearModelPath` + symmetric
+  `Save`/`LoadLinear`. Models persist as siblings — predict reads only
+  the named winner. `regressor.MakeContext` exposes the BM25-feature
+  pipeline so health and the predict path can't drift from training.
+- `hindcast show --health` displays the 50/50 numbers and the winner.
+- Stop-hook auto-tune additionally retrains both models on every refresh,
+  keeping the on-disk gobs current with `health.json`.
+
+### Behavioral notes
+
+- For the maintainer specifically, RegressorWinner = "none" — ladder
+  serves all predictions, no observable change.
+- For users whose data shape doesn't have a kNN cliff, a regressor
+  variant may activate automatically once `hindcast tune` runs once.
+- Anti-anchoring invariant unchanged: predictions still go only to the
+  human via status line, never to Claude's context.
+
+### Migration
+
+- Stale `regressor.gob` (v0.4 path) is no longer used; new paths are
+  `regressor.gbdt.gob` and `regressor.linear.gob`. Run `hindcast train`
+  or wait for the next Stop-hook refresh to populate them.
+- Old gob files have a 21-feature schema and would fail length checks
+  if loaded by v0.5 code paths — the new code only loads files written
+  by v0.5+ via the new paths, so v0.4 files are dormant, not dangerous.
+
+---
+
 ## [0.4.0] — unreleased — universal-features regressor (offline tooling)
 
 ### The investigation

@@ -46,24 +46,28 @@ func cmdTrain(args []string) {
 		os.Exit(1)
 	}
 	if err := m.Save(); err != nil {
-		fmt.Fprintf(os.Stderr, "hindcast train: save: %s\n", err)
+		fmt.Fprintf(os.Stderr, "hindcast train: save gbdt: %s\n", err)
 		os.Exit(1)
 	}
 
-	path, _ := regressor.ModelPath()
+	gbdtPath, _ := regressor.GBDTModelPath()
 	fmt.Printf("hindcast train: trained regressor on %d records (%d project(s))\n",
 		m.NTrain, len(byProject))
 	fmt.Printf("  GBDT:   %d trees (depth ≤3, lr=%.2f)  in-sample MALR=%.2fx\n",
 		len(m.Trees), m.LR, m.TrainMALR)
 
-	// Also fit a linear model for comparison. Cross-corpus eval showed
-	// linear beats GBDT at this sample size; in-sample comparison here
-	// gives a quick read on whether the same is true on user data.
+	// Also fit and persist a linear model. On user data with rich
+	// within-project history, GBDT can win; on cross-corpus unique-instance
+	// regimes, linear wins. Saving both lets the per-user winner pick at
+	// `hindcast tune` time route to whichever earns its keep.
 	if lm, err := regressor.TrainLinearFromRecords(byProject, *warmup, 1.0); err == nil {
 		fmt.Printf("  linear: ridge λ=%.1f                in-sample MALR=%.2fx\n",
 			lm.Lambda, lm.TrainMALR)
+		if err := lm.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "hindcast train: save linear: %s\n", err)
+		}
 	}
-	fmt.Printf("  saved:  %s\n", path)
+	fmt.Printf("  saved:  %s (+ linear sibling)\n", gbdtPath)
 
 	if *verbose {
 		fmt.Println("\n  features:")
@@ -116,7 +120,6 @@ func heldoutEval(byProject map[string][]store.Record, warmup int) {
 			ctx := regressor.Context{
 				PromptChars: r.PromptChars,
 				TaskType:    r.TaskType,
-				SizeBucket:  r.SizeBucket,
 				History:     hist,
 			}
 			gPred := gbdt.PredictWall(ctx)

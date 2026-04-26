@@ -24,11 +24,12 @@ import (
 type Source string
 
 const (
-	SourceKNN     Source = "knn"      // BM25 top-k neighbors, similarity above threshold
-	SourceBucket  Source = "bucket"   // task-type bucket within project
-	SourceProject Source = "project"  // overall project aggregate
-	SourceGlobal  Source = "global"   // cross-project sketch
-	SourceNone    Source = "none"     // no data at all
+	SourceKNN       Source = "knn"       // BM25 top-k neighbors, similarity above threshold
+	SourceBucket    Source = "bucket"    // task-type bucket within project
+	SourceProject   Source = "project"   // overall project aggregate
+	SourceGlobal    Source = "global"    // cross-project sketch
+	SourceRegressor Source = "regressor" // learned regressor (gbdt/linear), gated by health
+	SourceNone      Source = "none"      // no data at all
 )
 
 // Prediction is what gets written to the last-prediction file for the

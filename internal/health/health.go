@@ -21,6 +21,7 @@ import (
 
 	"github.com/justinstimatze/hindcast/internal/bm25"
 	"github.com/justinstimatze/hindcast/internal/predict"
+	"github.com/justinstimatze/hindcast/internal/regressor"
 	"github.com/justinstimatze/hindcast/internal/store"
 )
 
@@ -53,6 +54,21 @@ type Health struct {
 
 	// Per-sim-bucket detail for debugging.
 	SimBuckets []SimBucketStat `json:"sim_buckets,omitempty"`
+
+	// 50/50 chronological held-out eval. Separate methodology from the
+	// prefix-LOO numbers above — this exists to pick a per-user winner
+	// among {ladder, gbdt, linear}. Apples-to-apples on coverage: every
+	// counted test record has a prediction from each variant.
+	NHeldOut          int     `json:"n_held_out"`
+	LadderMALRHeldOut float64 `json:"ladder_malr_held_out"`
+	GBDTMALRHeldOut   float64 `json:"gbdt_malr_held_out"`
+	LinearMALRHeldOut float64 `json:"linear_malr_held_out"`
+	// RegressorWinner is "gbdt" | "linear" | "none". When "none", the
+	// existing ladder is the locally-winning strategy and predict.Predict
+	// keeps full control. When "gbdt"/"linear", the named regressor goes
+	// first in the predict path.
+	RegressorWinner       string  `json:"regressor_winner"`
+	RegressorLiftVsLadder float64 `json:"regressor_lift_vs_ladder"` // ladder_malr / winner_malr; >1 = winner better
 }
 
 type SimBucketStat struct {
@@ -247,7 +263,125 @@ func Compute(byProject map[string][]store.Record, sk *store.Sketch, warmup int) 
 	default:
 		h.Verdict = "kNN earns its keep at sim≥" + formatFloat(threshold)
 	}
+
+	// Per-user adaptive tier selection. Run a 50/50 chronological split
+	// per project, train both regressor variants on the first half, and
+	// compare ladder/gbdt/linear MALR on the same held-out test set.
+	// Soft-fails (zero MALRs, RegressorWinner="none") if data is thin.
+	evalAdaptive(h, byProject, sk, warmup)
 	return h
+}
+
+// evalAdaptive populates the 50/50 fields on h. Apples-to-apples: every
+// counted test record has a ladder pred AND a gbdt pred AND a linear pred.
+// If either regressor fails to train (insufficient data), winner="none"
+// and the ladder remains primary.
+func evalAdaptive(h *Health, byProject map[string][]store.Record, sk *store.Sketch, warmup int) {
+	trainRecs := map[string][]store.Record{}
+	testRecs := map[string][]store.Record{}
+	for k, recs := range byProject {
+		if len(recs) < 10 {
+			continue
+		}
+		sorted := make([]store.Record, len(recs))
+		copy(sorted, recs)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].TS.Before(sorted[j].TS) })
+		cut := len(sorted) / 2
+		trainRecs[k] = sorted[:cut]
+		testRecs[k] = sorted[cut:]
+	}
+
+	gbdt, gErr := regressor.Train(trainRecs, warmup)
+	lin, lErr := regressor.TrainLinearFromRecords(trainRecs, warmup, 1.0)
+	if gErr != nil && lErr != nil {
+		h.RegressorWinner = "none"
+		return
+	}
+
+	type triple struct{ ladder, gbdt, lin float64 }
+	var trios []triple
+	for k, test := range testRecs {
+		hist := append([]store.Record(nil), trainRecs[k]...)
+		idx := bm25.New()
+		for _, r := range hist {
+			regressor.AddRecordToIndex(idx, r)
+		}
+		for _, r := range test {
+			if r.WallSeconds <= 0 {
+				continue
+			}
+			lp := predict.Predict(r.PromptTokens, idx, hist, sk, r.TaskType)
+			if lp.Source == predict.SourceNone || lp.WallSeconds <= 0 {
+				hist = append(hist, r)
+				regressor.AddRecordToIndex(idx, r)
+				continue
+			}
+			ctx := regressor.MakeContext(r.PromptChars, r.TaskType, hist, r.PromptTokens, idx)
+			gPred := 0
+			if gbdt != nil {
+				gPred = gbdt.PredictWall(ctx)
+			}
+			lPred := 0
+			if lin != nil {
+				lPred = lin.PredictWall(ctx)
+			}
+			if gPred > 0 && lPred > 0 {
+				trios = append(trios, triple{
+					ladder: math.Abs(math.Log(float64(lp.WallSeconds) / float64(r.WallSeconds))),
+					gbdt:   math.Abs(math.Log(float64(gPred) / float64(r.WallSeconds))),
+					lin:    math.Abs(math.Log(float64(lPred) / float64(r.WallSeconds))),
+				})
+			}
+			hist = append(hist, r)
+			regressor.AddRecordToIndex(idx, r)
+		}
+	}
+	if len(trios) < 50 {
+		h.RegressorWinner = "none"
+		return
+	}
+
+	ladderArr := make([]float64, len(trios))
+	gbdtArr := make([]float64, len(trios))
+	linArr := make([]float64, len(trios))
+	for i, t := range trios {
+		ladderArr[i] = t.ladder
+		gbdtArr[i] = t.gbdt
+		linArr[i] = t.lin
+	}
+	h.NHeldOut = len(trios)
+	h.LadderMALRHeldOut = medianExp(ladderArr)
+	h.GBDTMALRHeldOut = medianExp(gbdtArr)
+	h.LinearMALRHeldOut = medianExp(linArr)
+
+	// Pick winner: lowest MALR among the regressor variants, but only if
+	// it beats the ladder by ≥15% lift. The 0.85× threshold mirrors the
+	// kNN/bucket gate above for consistency.
+	var winnerName string
+	var winnerMALR float64
+	if h.GBDTMALRHeldOut > 0 && (winnerMALR == 0 || h.GBDTMALRHeldOut < winnerMALR) {
+		winnerName, winnerMALR = "gbdt", h.GBDTMALRHeldOut
+	}
+	if h.LinearMALRHeldOut > 0 && (winnerMALR == 0 || h.LinearMALRHeldOut < winnerMALR) {
+		winnerName, winnerMALR = "linear", h.LinearMALRHeldOut
+	}
+	if winnerMALR > 0 && h.LadderMALRHeldOut > 0 && winnerMALR <= 0.85*h.LadderMALRHeldOut {
+		h.RegressorWinner = winnerName
+		h.RegressorLiftVsLadder = h.LadderMALRHeldOut / winnerMALR
+	} else {
+		h.RegressorWinner = "none"
+		if h.LadderMALRHeldOut > 0 && winnerMALR > 0 {
+			h.RegressorLiftVsLadder = h.LadderMALRHeldOut / winnerMALR
+		}
+	}
+}
+
+func medianExp(absLogs []float64) float64 {
+	if len(absLogs) == 0 {
+		return 0
+	}
+	sort.Float64s(absLogs)
+	return math.Exp(absLogs[len(absLogs)/2])
 }
 
 func malrOf(rs []prefRow) float64 {

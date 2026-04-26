@@ -12,6 +12,7 @@ import (
 	"github.com/justinstimatze/hindcast/internal/bm25"
 	"github.com/justinstimatze/hindcast/internal/health"
 	"github.com/justinstimatze/hindcast/internal/hook"
+	"github.com/justinstimatze/hindcast/internal/regressor"
 	"github.com/justinstimatze/hindcast/internal/sizes"
 	"github.com/justinstimatze/hindcast/internal/store"
 	"github.com/justinstimatze/hindcast/internal/transcript"
@@ -254,9 +255,19 @@ func doRecord(in recordInput) {
 			}
 			sk, _ := store.LoadSketch()
 			h := health.Compute(byProject, sk, 20)
+			// Refresh persisted regressor models on the same cadence so
+			// that when h.RegressorWinner is non-"none" the file the
+			// predict path loads is current. Failures are non-fatal —
+			// predict.computePrediction soft-falls-through to the ladder.
+			if m, err := regressor.Train(byProject, 20); err == nil {
+				_ = m.Save()
+			}
+			if lm, err := regressor.TrainLinearFromRecords(byProject, 20, 1.0); err == nil {
+				_ = lm.Save()
+			}
 			_ = h.Save()
-			hook.Logf("record", "auto-tune: threshold=%.2f knn-malr=%.2f bucket-malr=%.2f n=%d",
-				h.TunedSimThreshold, h.KNNMALRAtThreshold, h.BucketMALR, h.NPredictions)
+			hook.Logf("record", "auto-tune: threshold=%.2f knn-malr=%.2f winner=%s lift=%.2fx n=%d",
+				h.TunedSimThreshold, h.KNNMALRAtThreshold, h.RegressorWinner, h.RegressorLiftVsLadder, h.NPredictions)
 		}()
 	}
 

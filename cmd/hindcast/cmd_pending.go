@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/justinstimatze/hindcast/internal/bm25"
+	"github.com/justinstimatze/hindcast/internal/health"
 	"github.com/justinstimatze/hindcast/internal/hook"
 	"github.com/justinstimatze/hindcast/internal/predict"
+	"github.com/justinstimatze/hindcast/internal/regressor"
 	"github.com/justinstimatze/hindcast/internal/store"
 	"github.com/justinstimatze/hindcast/internal/tags"
 	"github.com/justinstimatze/hindcast/internal/transcript"
@@ -66,7 +68,7 @@ func cmdPending() {
 
 	// Compute prediction for the human via status line. Claude never sees
 	// this — it's written to disk for `hindcast statusline` to render.
-	pred := computePrediction(hash, tokens, taskType, in.SessionID)
+	pred := computePrediction(hash, tokens, taskType, in.SessionID, len(in.Prompt))
 	writeLastPrediction(in.SessionID, pred)
 
 	if path, err := store.PendingPath(in.SessionID); err == nil {
@@ -134,10 +136,12 @@ func deliverBM25(queryHashes []uint64, hash string) {
 		m.Sim, bucket, m.Doc.ToolCount, m.Doc.FilesTouched, activeMin, wallMin)
 }
 
-// computePrediction runs the BM25-kNN predictor against the project's
-// records and returns a Prediction. Soft-fails to SourceNone on any
-// IO error — prediction is best-effort, never blocks the hook.
-func computePrediction(hash string, tokens []uint64, taskType, sessionID string) predict.Prediction {
+// computePrediction returns a Prediction for the current turn. The tier
+// order is health-driven: if `hindcast tune` measured a learned regressor
+// to beat the ladder by ≥15% on this user's 50/50 held-out split, the
+// regressor goes first. Otherwise the existing kNN→bucket→project→global
+// ladder runs unchanged. Soft-fails to SourceNone on any IO error.
+func computePrediction(hash string, tokens []uint64, taskType, sessionID string, promptChars int) predict.Prediction {
 	var idx *bm25.Index
 	if bm25Path, err := store.ProjectBM25Path(hash); err == nil {
 		if loaded, err := bm25.Load(bm25Path); err == nil {
@@ -152,9 +156,81 @@ func computePrediction(hash string, tokens []uint64, taskType, sessionID string)
 	if loaded, err := store.LoadSketch(); err == nil {
 		sk = loaded
 	}
+
+	if pred, ok := tryRegressorPrediction(tokens, taskType, promptChars, records, idx); ok {
+		pred.SessionID = sessionID
+		return pred
+	}
+
 	p := predict.Predict(tokens, idx, records, sk, taskType)
 	p.SessionID = sessionID
 	return p
+}
+
+// tryRegressorPrediction consults health.json's RegressorWinner and, if
+// non-empty, loads the named model and returns its prediction. Any
+// failure (no health, winner=none, model load error, prediction <= 0)
+// returns ok=false so the caller falls through to the ladder.
+func tryRegressorPrediction(tokens []uint64, taskType string, promptChars int, records []store.Record, idx *bm25.Index) (predict.Prediction, bool) {
+	h, err := health.Load()
+	if err != nil || h == nil {
+		return predict.Prediction{}, false
+	}
+	if h.RegressorWinner != "gbdt" && h.RegressorWinner != "linear" {
+		return predict.Prediction{}, false
+	}
+	ctx := regressor.MakeContext(promptChars, taskType, records, tokens, idx)
+	var wall int
+	switch h.RegressorWinner {
+	case "gbdt":
+		m, err := regressor.Load()
+		if err != nil || m == nil {
+			return predict.Prediction{}, false
+		}
+		wall = m.PredictWall(ctx)
+	case "linear":
+		m, err := regressor.LoadLinear()
+		if err != nil || m == nil {
+			return predict.Prediction{}, false
+		}
+		wall = m.PredictWall(ctx)
+	}
+	if wall <= 0 {
+		return predict.Prediction{}, false
+	}
+	// Active seconds: scale by the same active/wall ratio kNN observed in
+	// nearest neighbors when available, else fall back to wall as a floor.
+	// Avoids the regressor being mute on active when status line wants it.
+	active := wall
+	if idx != nil && len(idx.Docs) > 0 && len(tokens) > 0 {
+		matches := idx.TopK(tokens, 3)
+		var num, den int
+		for _, m := range matches {
+			if m.Sim < 0.15 || m.Doc.WallSeconds <= 0 {
+				continue
+			}
+			num += m.Doc.ActiveSeconds
+			den += m.Doc.WallSeconds
+		}
+		if den > 0 {
+			active = wall * num / den
+			if active < 1 {
+				active = 1
+			}
+		}
+	}
+	return predict.Prediction{
+		WallSeconds:   wall,
+		ActiveSeconds: active,
+		WallP25:       wall, // regressor returns a point estimate; band reuses it
+		WallP75:       wall,
+		ActiveP25:     active,
+		ActiveP75:     active,
+		N:             h.NHeldOut,
+		MaxSim:        ctx.BM25MaxSim,
+		Source:        predict.SourceRegressor,
+		TaskType:      taskType,
+	}, true
 }
 
 // writeLastPrediction persists the current prediction to both a

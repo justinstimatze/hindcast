@@ -49,7 +49,7 @@ func cmdPredict(args []string) {
 		tokens = bm25.HashTokens(prompt, salt)
 	}
 
-	p := computePrediction(hash, tokens, taskType, "")
+	p := computePrediction(hash, tokens, taskType, "", len(prompt))
 
 	if *jsonOut {
 		data, _ := json.MarshalIndent(p, "", "  ")
