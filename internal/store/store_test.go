@@ -1,0 +1,218 @@
+package store
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestProjectHashStable(t *testing.T) {
+	if ProjectHash("hindcast") != ProjectHash("hindcast") {
+		t.Error("hash not stable")
+	}
+	if len(ProjectHash("hindcast")) != 8 {
+		t.Error("hash length != 8")
+	}
+	if ProjectHash("hindcast") == ProjectHash("other") {
+		t.Error("different inputs should hash differently")
+	}
+}
+
+func TestResolveProjectOverride(t *testing.T) {
+	dir := t.TempDir()
+	if got := ResolveProject(dir); got != filepath.Base(dir) {
+		t.Errorf("fallback = %q, want basename %q", got, filepath.Base(dir))
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".hindcast-project"), []byte("custom-name\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveProject(dir); got != "custom-name" {
+		t.Errorf("override = %q, want custom-name", got)
+	}
+}
+
+func TestLockAcquireReleaseExclusive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lock")
+
+	l1, err := AcquireLock(path)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	if _, err := AcquireLock(path); err == nil {
+		t.Error("second acquire should fail while lock is held by live pid")
+	}
+	if err := l1.Release(); err != nil {
+		t.Errorf("release: %v", err)
+	}
+	l2, err := AcquireLock(path)
+	if err != nil {
+		t.Fatalf("post-release acquire: %v", err)
+	}
+	l2.Release()
+}
+
+func TestLockStaleDetection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lock")
+	if err := os.WriteFile(path, []byte("99999999"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	l, err := AcquireLock(path)
+	if err != nil {
+		t.Fatalf("stale-lock acquire failed: %v", err)
+	}
+	l.Release()
+}
+
+func TestLockMalformedPID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lock")
+	if err := os.WriteFile(path, []byte("not a number"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	l, err := AcquireLock(path)
+	if err != nil {
+		t.Fatalf("malformed-pid acquire failed: %v", err)
+	}
+	l.Release()
+}
+
+func TestAppendAndReadRecords(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.jsonl")
+	for i := 0; i < 3; i++ {
+		r := Record{
+			TS:          time.Now().UTC(),
+			SessionID:   "s1",
+			ProjectHash: "abc12345",
+			TaskType:    "feature",
+			WallSeconds: i * 10,
+		}
+		if err := AppendRecord(path, r); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	out, err := ReadRecentRecords(path, 10)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("want 3, got %d", len(out))
+	}
+	for i, r := range out {
+		if r.SchemaVersion != SchemaVersion {
+			t.Errorf("record %d SchemaVersion = %d", i, r.SchemaVersion)
+		}
+	}
+	// Newest first — ascending WallSeconds input → descending on read.
+	if out[0].WallSeconds != 20 {
+		t.Errorf("newest should have wall=20, got %d", out[0].WallSeconds)
+	}
+}
+
+func TestAppendOversizedTruncates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	huge := make(map[string]int)
+	for i := 0; i < 500; i++ {
+		huge[fmt.Sprintf("Tool%d", i)] = i
+	}
+	r := Record{ToolCalls: huge}
+	if err := AppendRecord(path, r); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	if len(data) > MaxRecordSize {
+		t.Errorf("record exceeded cap: %d > %d", len(data), MaxRecordSize)
+	}
+}
+
+func TestSketchPercentiles(t *testing.T) {
+	s := &Sketch{MaxSize: 20}
+	for i := 1; i <= 10; i++ {
+		s.Add(i*10, i)
+	}
+	wallMed, wallP90, activeMed, activeP90, n := s.Percentiles()
+	if n != 10 {
+		t.Errorf("n = %d, want 10", n)
+	}
+	if wallMed != 55.0 {
+		t.Errorf("wallMed = %v, want 55", wallMed)
+	}
+	if wallP90 != 91.0 {
+		t.Errorf("wallP90 = %v, want 91", wallP90)
+	}
+	if activeMed != 5.5 {
+		t.Errorf("activeMed = %v, want 5.5", activeMed)
+	}
+	if activeP90 < 9.0 || activeP90 > 9.2 {
+		t.Errorf("activeP90 = %v, want ~9.1", activeP90)
+	}
+}
+
+func TestSketchRollingWindow(t *testing.T) {
+	s := &Sketch{MaxSize: 5}
+	for i := 1; i <= 10; i++ {
+		s.Add(i, i)
+	}
+	if len(s.Wall) != 5 {
+		t.Errorf("len(Wall) = %d, want 5 (rolling window)", len(s.Wall))
+	}
+	if s.Wall[0] != 6 || s.Wall[4] != 10 {
+		t.Errorf("rolling window contents wrong: %v", s.Wall)
+	}
+}
+
+func TestPendingRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pending.json")
+	p := PendingTurn{
+		SessionID:      "s-42",
+		StartTS:        time.Now().UTC().Truncate(time.Second),
+		TaskType:       "feature",
+		PromptTokens:   []uint64{1, 2, 3, 4},
+		PromptChars:    100,
+		PermissionMode: "auto-accept",
+		ProjectHash:    "abc12345",
+		CWD:            "/tmp/p1",
+	}
+	if err := WritePending(path, p); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := ReadPending(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got.SessionID != p.SessionID || got.TaskType != p.TaskType {
+		t.Errorf("roundtrip mismatch: got %+v, want %+v", got, p)
+	}
+	if len(got.PromptTokens) != 4 {
+		t.Errorf("tokens len = %d, want 4", len(got.PromptTokens))
+	}
+	if !got.StartTS.Equal(p.StartTS) {
+		t.Errorf("StartTS: got %v, want %v", got.StartTS, p.StartTS)
+	}
+}
+
+// Privacy invariant check: the persisted Record JSON must not contain
+// any prompt_first_line field. If someone reintroduces it, this fails.
+func TestRecordContainsNoPromptText(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	r := Record{
+		SessionID:   "s",
+		TaskType:    "feature",
+		WallSeconds: 10,
+	}
+	if err := AppendRecord(path, r); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "prompt_first_line") {
+		t.Errorf("persisted record leaks prompt_first_line: %s", data)
+	}
+}

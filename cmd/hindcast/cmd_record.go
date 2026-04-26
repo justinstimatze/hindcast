@@ -1,0 +1,378 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"time"
+
+	"github.com/justinstimatze/hindcast/internal/bm25"
+	"github.com/justinstimatze/hindcast/internal/hook"
+	"github.com/justinstimatze/hindcast/internal/sizes"
+	"github.com/justinstimatze/hindcast/internal/store"
+	"github.com/justinstimatze/hindcast/internal/transcript"
+)
+
+type recordInput struct {
+	SessionID      string `json:"session_id"`
+	CWD            string `json:"cwd"`
+	TranscriptPath string `json:"transcript_path"`
+	PermissionMode string `json:"permission_mode"`
+	HookEventName  string `json:"hook_event_name"`
+}
+
+const recordTimeout = 30 * time.Second
+
+// cmdRecord dispatches: parent forwards stdin to a temp file and spawns
+// a detached worker; worker reads the temp file and does the work.
+// HINDCAST_WORKER=1 marks the worker invocation.
+func cmdRecord() {
+	if os.Getenv("HINDCAST_SKIP") == "1" {
+		return
+	}
+	if os.Getenv("HINDCAST_WORKER") == "1" {
+		recordWorker()
+		return
+	}
+	recordParent()
+}
+
+func recordParent() {
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, os.Stdin); err != nil {
+		return
+	}
+	if buf.Len() == 0 {
+		return
+	}
+
+	tmpDir, err := store.TmpDir()
+	if err != nil {
+		return
+	}
+	tmpf, err := os.CreateTemp(tmpDir, "record-*.json")
+	if err != nil {
+		return
+	}
+	tmpPath := tmpf.Name()
+	if _, err := tmpf.Write(buf.Bytes()); err != nil {
+		tmpf.Close()
+		os.Remove(tmpPath)
+		return
+	}
+	tmpf.Close()
+
+	exe, err := os.Executable()
+	if err != nil {
+		os.Remove(tmpPath)
+		return
+	}
+	cmd := exec.Command(exe, "record", tmpPath)
+	cmd.Env = append(os.Environ(), "HINDCAST_WORKER=1")
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.SysProcAttr = detachAttrs()
+	if err := cmd.Start(); err != nil {
+		os.Remove(tmpPath)
+		return
+	}
+}
+
+func recordWorker() {
+	if len(os.Args) < 3 {
+		return
+	}
+	inputPath := os.Args[2]
+	defer os.Remove(inputPath)
+
+	done := make(chan struct{})
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				hook.Logf("record", "worker goroutine PANIC %v", r)
+			}
+			close(done)
+		}()
+		data, err := os.ReadFile(inputPath)
+		if err != nil {
+			return
+		}
+		var in recordInput
+		if err := json.Unmarshal(data, &in); err != nil {
+			hook.Logf("record", "worker decode: %s", err)
+			return
+		}
+		doRecord(in)
+	}()
+	select {
+	case <-done:
+	case <-time.After(recordTimeout):
+		hook.Logf("record", "worker exceeded %s timeout", recordTimeout)
+	}
+}
+
+func doRecord(in recordInput) {
+	if in.SessionID == "" {
+		return
+	}
+	pendingPath, err := store.PendingPath(in.SessionID)
+	if err != nil {
+		hook.Logf("record", "pending path: %s", err)
+		return
+	}
+	pend, err := store.ReadPending(pendingPath)
+	if err != nil {
+		hook.Logf("record", "read pending: %s", err)
+		return
+	}
+	defer os.Remove(pendingPath)
+
+	_ = store.SweepPending(6 * time.Hour)
+
+	turns, err := transcript.ParseTail(in.TranscriptPath, 2*1024*1024, pend.StartTS)
+	if err != nil {
+		hook.Logf("record", "parse transcript: %s", err)
+		return
+	}
+	if len(turns) == 0 {
+		hook.Logf("record", "no turns since %s", pend.StartTS.Format(time.RFC3339))
+		return
+	}
+	turn := turns[0]
+
+	// Claude's self-reported estimate (if any) — written by the
+	// hindcast_estimate MCP tool to a per-session file. Read and unlink.
+	estWall, estActive := 0, 0
+	if estPath, err := store.EstimatePath(pend.SessionID); err == nil {
+		if data, err := os.ReadFile(estPath); err == nil {
+			var est struct {
+				WallSeconds   int `json:"wall_seconds"`
+				ActiveSeconds int `json:"active_seconds"`
+			}
+			if err := json.Unmarshal(data, &est); err == nil {
+				estWall = est.WallSeconds
+				estActive = est.ActiveSeconds
+			}
+			_ = os.Remove(estPath)
+		}
+	}
+
+	toolCount := 0
+	for _, n := range turn.ToolCalls {
+		toolCount += n
+	}
+
+	r := store.Record{
+		TS:                   time.Now().UTC(),
+		SessionID:            pend.SessionID,
+		ProjectHash:          pend.ProjectHash,
+		Model:                turn.Model,
+		PermissionMode:       pend.PermissionMode,
+		TaskType:             pend.TaskType,
+		SizeBucket:           string(sizes.Classify(turn.FilesTouched, toolCount)),
+		WallSeconds:          turn.WallSeconds(),
+		ClaudeActiveSeconds:  turn.ActiveSeconds,
+		PromptChars:          pend.PromptChars,
+		PromptTokens:         pend.PromptTokens,
+		ResponseChars:        turn.ResponseChars,
+		ToolCalls:            turn.ToolCalls,
+		FilesTouched:         turn.FilesTouched,
+		Arm:                  pend.Arm,
+		ClaudeEstimateWall:   estWall,
+		ClaudeEstimateActive: estActive,
+	}
+
+	lockPath, err := store.LockPath(pend.ProjectHash)
+	if err != nil {
+		hook.Logf("record", "lock path: %s", err)
+		return
+	}
+	lock, err := store.AcquireLock(lockPath)
+	if err != nil {
+		hook.Logf("record", "acquire lock: %s", err)
+		return
+	}
+	defer lock.Release()
+
+	logPath, err := store.ProjectLogPath(pend.ProjectHash)
+	if err != nil {
+		hook.Logf("record", "log path: %s", err)
+		return
+	}
+	if err := store.AppendRecord(logPath, r); err != nil {
+		hook.Logf("record", "append: %s", err)
+		return
+	}
+
+	// After appending, check whether the log rotated and if so, rebuild
+	// the BM25 index from the records still in the active log so index
+	// and log stay in sync.
+	if err := rotateBM25IfNeeded(logPath, pend.ProjectHash); err != nil {
+		hook.Logf("record", "bm25 rotate: %s", err)
+	}
+
+	if err := updateBM25(pend.ProjectHash, pend.PromptTokens, r, toolCount); err != nil {
+		hook.Logf("record", "bm25 update: %s", err)
+	}
+	if err := updateSketch(r); err != nil {
+		hook.Logf("record", "sketch update: %s", err)
+	}
+
+	hook.Logf("record",
+		"recorded: session=%s project=%s task=%s size=%s wall=%ds active=%ds tools=%d files=%d",
+		r.SessionID, r.ProjectHash, r.TaskType, r.SizeBucket,
+		r.WallSeconds, r.ClaudeActiveSeconds, toolCount, r.FilesTouched)
+
+	// Reconciliation log: one line per turn with predicted vs actual.
+	// This is the primary quality signal post-pivot — replaces eval-api
+	// as "does hindcast's predictor help?" because it measures the
+	// predictor directly without involving Claude's estimation loop.
+	if pend.PredictedWall > 0 || pend.PredictedActive > 0 {
+		appendAccuracyLine(pend.ProjectHash, pend, r)
+	}
+
+	// Update per-session momentum tracker so next UserPromptSubmit in
+	// the same session can use recent-turn context as an additional
+	// predictor alongside the project×task bucket.
+	if sm, err := store.LoadSessionMomentum(r.SessionID); err == nil {
+		sm.AppendTurn(r.WallSeconds, r.ClaudeActiveSeconds)
+		_ = sm.Save()
+	}
+}
+
+// appendAccuracyLine writes one JSONL line per turn to the project's
+// accuracy.jsonl so `hindcast show --accuracy` can compute rolling
+// predictor MALR. Best-effort — soft-fails on IO errors.
+func appendAccuracyLine(hash string, pend store.PendingTurn, r store.Record) {
+	path, err := store.AccuracyLogPath(hash)
+	if err != nil {
+		return
+	}
+	row := map[string]any{
+		"ts":               r.TS.Format(time.RFC3339),
+		"session_id":       r.SessionID,
+		"task_type":        r.TaskType,
+		"size_bucket":      r.SizeBucket,
+		"predicted_wall":   pend.PredictedWall,
+		"predicted_active": pend.PredictedActive,
+		"actual_wall":      r.WallSeconds,
+		"actual_active":    r.ClaudeActiveSeconds,
+		"source":           pend.PredictionSrc,
+	}
+	data, err := json.Marshal(row)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintln(f, string(data))
+}
+
+func updateBM25(hash string, promptHashes []uint64, r store.Record, toolCount int) error {
+	if len(promptHashes) == 0 {
+		return nil
+	}
+	path, err := store.ProjectBM25Path(hash)
+	if err != nil {
+		return err
+	}
+	idx, err := bm25.Load(path)
+	if err != nil {
+		return err
+	}
+	idx.Add(promptHashes, bm25.Doc{
+		ActiveSeconds: r.ClaudeActiveSeconds,
+		WallSeconds:   r.WallSeconds,
+		TaskType:      r.TaskType,
+		SizeBucket:    r.SizeBucket,
+		ToolCount:     toolCount,
+		FilesTouched:  r.FilesTouched,
+	})
+	return idx.Save(path)
+}
+
+// updateSketch takes a global sketch lock around the load-modify-save
+// sequence. The per-project lock doesn't cover cross-project races — two
+// Stops on different projects would both read old sketch and both write
+// new sketch, losing one sample.
+// rotateBM25IfNeeded checks if the active log was just rotated out (file
+// size back to near-zero after AppendRecord) and if so, rebuilds the
+// BM25 index from the (now trimmed) record set. Cheap fast-path when no
+// rotation happened: just returns.
+func rotateBM25IfNeeded(logPath, hash string) error {
+	stat, err := os.Stat(logPath)
+	if err != nil {
+		return nil
+	}
+	// Rotation happened if the rotated segment (.1) exists AND is
+	// younger than the active log's modification time. Heuristic: if
+	// .1 exists and active log is small, we just rotated.
+	rotatedPath := logPath + ".1"
+	rotStat, err := os.Stat(rotatedPath)
+	if err != nil || rotStat.Size() < store.LogRotateSize {
+		return nil
+	}
+	if stat.Size() > store.MaxRecordSize*2 {
+		return nil // active log not freshly rotated
+	}
+	// Rebuild BM25 from current active log's records.
+	records, err := store.ReadRecentRecords(logPath, 500)
+	if err != nil {
+		return err
+	}
+	bm25Path, err := store.ProjectBM25Path(hash)
+	if err != nil {
+		return err
+	}
+	// Check if rebuild is actually warranted: compare index's doc count
+	// to active log's record count. Only rebuild on significant drift.
+	idx, _ := bm25.Load(bm25Path)
+	if idx != nil && len(idx.Docs) <= len(records)*2 {
+		return nil
+	}
+	fresh := bm25.New()
+	for _, r := range records {
+		if len(r.PromptTokens) == 0 {
+			continue
+		}
+		toolCount := 0
+		for _, c := range r.ToolCalls {
+			toolCount += c
+		}
+		fresh.Add(r.PromptTokens, bm25.Doc{
+			ActiveSeconds: r.ClaudeActiveSeconds,
+			WallSeconds:   r.WallSeconds,
+			TaskType:      r.TaskType,
+			SizeBucket:    r.SizeBucket,
+			ToolCount:     toolCount,
+			FilesTouched:  r.FilesTouched,
+		})
+	}
+	return fresh.Save(bm25Path)
+}
+
+func updateSketch(r store.Record) error {
+	lockPath, err := store.GlobalSketchLockPath()
+	if err != nil {
+		return err
+	}
+	lock, err := store.AcquireLock(lockPath)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+
+	s, err := store.LoadSketch()
+	if err != nil {
+		return err
+	}
+	s.Add(r.WallSeconds, r.ClaudeActiveSeconds)
+	return s.Save()
+}

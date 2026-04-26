@@ -1,0 +1,20 @@
+# binaries
+/hindcast
+/dist/
+
+# test artifacts
+*.test
+*.out
+*.prof
+coverage.*
+
+# defn state (code graph + Dolt server)
+/.defn/
+
+# OS
+.DS_Store
+
+# Local secrets
+.env
+.env.local
+*.key
