@@ -122,6 +122,8 @@ hindcast status                 Hook health: hook.log tail, panic count, current
 hindcast bench                  Offline prediction-accuracy ablation over backfilled data.
 hindcast bench-cross [--corpus] Cross-corpus benchmark vs METR HCAST or OpenHands traces.
 hindcast verify [--lift-min X]  Self-eval: LOO predict on your data, emit PASS/FAIL verdict.
+hindcast tune                   Find your empirical sim cliff; persist to health.json.
+hindcast show --health          Display tuned predictor state + sim-bucket MALR.
 hindcast backfill [--rebuild]   Re-parse ~/.claude/projects/*/. Safe to re-run.
 hindcast forget <project>       Delete one project's data.
 hindcast rotate-salt            Regenerate BM25 salt; clears indexes (records kept).
@@ -153,7 +155,7 @@ Honest cross-corpus findings (~6,000 predictions across two public corpora):
 
 - **Architecture (per-project chronological history) generalizes.** Group-median MALR is comparable across corpora and matches what you'd see locally.
 - **The BM25 prompt-similarity mechanism is use-case-dependent.** It works well when prompts are evolving multi-turn task work (typical Claude Code use). It works poorly on independent-task corpora like SWE-bench Lite (BM25 sim picks up library-name overlap, not task overlap).
-- The single-threshold gate (`sim ≥ 0.5`) tuned on the maintainer's data does NOT generalize to all corpora. Future versions will auto-tune the threshold per user.
+- The single-threshold gate (`sim ≥ 0.5`) tuned on the maintainer's data does NOT generalize to all corpora. v0.3.1 ships `hindcast tune` (auto-runs from the Stop hook when `health.json` is stale): each install computes its own empirical cliff via prefix-LOO and persists it. View with `hindcast show --health`. The tuned threshold is computed but not yet wired into a text-injection gate; status line stays the universal default.
 
 If your usage looks like Claude Code (multi-turn project work), expect kNN to earn its keep. If you use Claude Code for one-shot independent tasks, the bucket/project tier may be the ceiling.
 
