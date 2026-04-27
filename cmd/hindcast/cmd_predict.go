@@ -104,7 +104,14 @@ func cmdStatusline(args []string) {
 // handles its own styling.
 func formatPrediction(p predict.Prediction) string {
 	if p.Source == predict.SourceNone {
-		return "hindcast: no data yet"
+		switch {
+		case p.N == 0:
+			return "hindcast: calibrating · 0 records — predictions land after a few turns"
+		case p.N < 4:
+			return fmt.Sprintf("hindcast: calibrating · %d/4 records in this project", p.N)
+		default:
+			return fmt.Sprintf("hindcast: insufficient signal · %d records but no tier fired", p.N)
+		}
 	}
 	wall := humanDuration(p.WallSeconds)
 	active := humanDuration(p.ActiveSeconds)

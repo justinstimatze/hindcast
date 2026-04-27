@@ -134,7 +134,11 @@ func Predict(queryHashes []uint64, idx *bm25.Index, records []store.Record, sk *
 		return quantilePrediction(walls, actives, SourceGlobal, taskType)
 	}
 
-	return Prediction{Source: SourceNone, TaskType: taskType}
+	// SourceNone: every tier refused. Pass len(records) through as N so
+	// the status line can render a useful cold-start message instead of
+	// a bare "no data yet". Project tier needs ≥4; status line uses N to
+	// tell the user how close they are.
+	return Prediction{Source: SourceNone, TaskType: taskType, N: len(records)}
 }
 
 type weighted struct {

@@ -211,10 +211,17 @@ func showAccuracy(projectFilter string) {
 		return
 	}
 
-	fmt.Printf("hindcast predictor accuracy: %d turns across %d project(s)\n\n", len(rows), projectCount)
+	usableWall := wallLogRatios(rows)
+	if len(usableWall) == 0 {
+		fmt.Printf("hindcast predictor accuracy: %d turns logged across %d project(s) — none yet have both predicted and actual non-zero (need a few more turns)\n",
+			len(rows), projectCount)
+		return
+	}
+	fmt.Printf("hindcast predictor accuracy: %d turns across %d project(s) (%d usable for wall MALR)\n\n",
+		len(rows), projectCount, len(usableWall))
 
 	// Overall MALR (wall and active).
-	overallWall := malr(wallLogRatios(rows))
+	overallWall := malr(usableWall)
 	overallActive := malr(activeLogRatios(rows))
 	fmt.Printf("overall MALR: wall %.2fx   active %.2fx\n", overallWall, overallActive)
 

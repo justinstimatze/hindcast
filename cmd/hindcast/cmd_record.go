@@ -233,7 +233,11 @@ func doRecord(in recordInput) {
 	// This is the primary quality signal post-pivot — replaces eval-api
 	// as "does hindcast's predictor help?" because it measures the
 	// predictor directly without involving Claude's estimation loop.
-	if pend.PredictedWall > 0 || pend.PredictedActive > 0 {
+	// Reconcile only when both sides are non-zero. Skipped sessions
+	// (HINDCAST_SKIP=1), interrupts before any tool ran, and other
+	// pathological turns produce actual_wall=0 — counting them in the
+	// accuracy log adds noise without signal.
+	if (pend.PredictedWall > 0 || pend.PredictedActive > 0) && r.WallSeconds > 0 {
 		appendAccuracyLine(pend.ProjectHash, pend, r)
 	}
 
