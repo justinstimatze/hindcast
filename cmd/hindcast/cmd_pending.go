@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -181,6 +182,7 @@ func tryRegressorPrediction(tokens []uint64, taskType string, promptChars int, r
 	}
 	ctx := regressor.MakeContext(promptChars, taskType, records, tokens, idx)
 	var wall int
+	var resP25, resP75 float64
 	switch h.RegressorWinner {
 	case "gbdt":
 		m, err := regressor.Load()
@@ -188,16 +190,23 @@ func tryRegressorPrediction(tokens []uint64, taskType string, promptChars int, r
 			return predict.Prediction{}, false
 		}
 		wall = m.PredictWall(ctx)
+		resP25, resP75 = m.TrainResidualP25, m.TrainResidualP75
 	case "linear":
 		m, err := regressor.LoadLinear()
 		if err != nil || m == nil {
 			return predict.Prediction{}, false
 		}
 		wall = m.PredictWall(ctx)
+		resP25, resP75 = m.TrainResidualP25, m.TrainResidualP75
 	}
 	if wall <= 0 {
 		return predict.Prediction{}, false
 	}
+	// Band: residuals are (pred - actual) in log-space. p25 (often <0) means
+	// model undershot; map to upper band. p75 (often >0) means model
+	// overshot; map to lower band. In-sample residuals understate held-out
+	// spread but beat a degenerate point band.
+	wallLow, wallHigh := bandFromResiduals(wall, resP25, resP75)
 	// Active seconds: scale by the same active/wall ratio kNN observed in
 	// nearest neighbors when available, else fall back to wall as a floor.
 	// Avoids the regressor being mute on active when status line wants it.
@@ -219,18 +228,43 @@ func tryRegressorPrediction(tokens []uint64, taskType string, promptChars int, r
 			}
 		}
 	}
+	activeLow, activeHigh := wallLow, wallHigh
+	if wall > 0 {
+		activeLow = wallLow * active / wall
+		activeHigh = wallHigh * active / wall
+	}
 	return predict.Prediction{
 		WallSeconds:   wall,
 		ActiveSeconds: active,
-		WallP25:       wall, // regressor returns a point estimate; band reuses it
-		WallP75:       wall,
-		ActiveP25:     active,
-		ActiveP75:     active,
+		WallP25:       wallLow,
+		WallP75:       wallHigh,
+		ActiveP25:     activeLow,
+		ActiveP75:     activeHigh,
 		N:             h.NHeldOut,
 		MaxSim:        ctx.BM25MaxSim,
 		Source:        predict.SourceRegressor,
+		SourceDetail:  h.RegressorWinner,
 		TaskType:      taskType,
 	}, true
+}
+
+// bandFromResiduals turns log-space residual percentiles into a wall-second
+// band around pred. Residual = log(pred) - log(actual); positive means
+// overshoot. P25/P75 of residuals therefore become divisors that produce
+// wallLow (from upper residual percentile) and wallHigh (from lower).
+func bandFromResiduals(pred int, resP25, resP75 float64) (int, int) {
+	if pred <= 0 || (resP25 == 0 && resP75 == 0) {
+		return pred, pred
+	}
+	low := float64(pred) * math.Exp(-resP75)
+	high := float64(pred) * math.Exp(-resP25)
+	if low < 1 {
+		low = 1
+	}
+	if high < low {
+		high = low
+	}
+	return int(low + 0.5), int(high + 0.5)
 }
 
 // writeLastPrediction persists the current prediction to both a

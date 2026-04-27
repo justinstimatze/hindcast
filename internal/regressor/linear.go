@@ -92,6 +92,10 @@ type LinearModel struct {
 	NTrain    int
 	TrainMALR float64
 	Lambda    float64
+
+	// Train-set residual percentiles in log-space; same role as on Model.
+	TrainResidualP25 float64
+	TrainResidualP75 float64
 }
 
 // TrainLinear fits a ridge regression on (X, y) under squared loss.
@@ -176,10 +180,13 @@ func TrainLinear(X [][]float64, y []float64, lambda float64) (*LinearModel, erro
 		Lambda:       lambda,
 	}
 	preds := make([]float64, n)
+	residuals := make([]float64, n)
 	for i := 0; i < n; i++ {
 		preds[i] = m.Predict(X[i])
+		residuals[i] = preds[i] - y[i]
 	}
 	m.TrainMALR = MAD(preds, y)
+	m.TrainResidualP25, m.TrainResidualP75 = quantilePair(residuals, 0.25, 0.75)
 	return m, nil
 }
 

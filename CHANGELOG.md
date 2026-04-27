@@ -54,6 +54,18 @@ distribution is heterogeneous and the model was free-riding on it.
 - `hindcast show --health` displays the 50/50 numbers and the winner.
 - Stop-hook auto-tune additionally retrains both models on every refresh,
   keeping the on-disk gobs current with `health.json`.
+- Regressor bands: train-set residual P25/P75 (log-space) persisted on
+  each model and rendered as `[low–high]` on the status line. In-sample
+  residuals understate held-out spread; treat as a "better than nothing"
+  floor, not a calibrated interval.
+- Status line distinguishes regressor variants: `regressor:linear`/
+  `regressor:gbdt` instead of bare `regressor`. New `SourceDetail` field
+  on `predict.Prediction` carries the variant name.
+- Tests added for `internal/predict` (ladder behavior),
+  `internal/regressor` (feature/Extract length parity, train + save/load
+  roundtrip, insufficient-data sentinel), and `internal/health` (empty
+  + flat-data RegressorWinner=none case). Catches the size-feature class
+  of regression — Extract column count must match FeatureNames length.
 
 ### Behavioral notes
 

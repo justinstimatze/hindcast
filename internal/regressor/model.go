@@ -36,6 +36,13 @@ type Model struct {
 	TrainedAt    time.Time
 	NTrain       int
 	TrainMALR    float64 // in-sample MALR (sanity check, not held-out)
+
+	// Train-set residual percentiles in log-space — pred minus actual.
+	// Used at predict time to render a P25/P75 band on the status line.
+	// In-sample residuals understate held-out spread; this is a "better
+	// than no band" floor, not a calibrated interval.
+	TrainResidualP25 float64
+	TrainResidualP75 float64
 }
 
 // Predict returns the model's prediction in log-space. Use PredictWall
@@ -141,12 +148,35 @@ func Train(byProject map[string][]store.Record, warmup int) (*Model, error) {
 	m.NTrain = len(X)
 
 	preds := make([]float64, len(X))
+	residuals := make([]float64, len(X))
 	for i := range X {
 		preds[i] = m.Predict(X[i])
+		residuals[i] = preds[i] - y[i]
 	}
 	m.TrainMALR = MAD(preds, y)
+	m.TrainResidualP25, m.TrainResidualP75 = quantilePair(residuals, 0.25, 0.75)
 
 	return m, nil
+}
+
+// quantilePair returns the two quantiles of xs without sorting twice.
+// xs is mutated (sorted in place).
+func quantilePair(xs []float64, lo, hi float64) (float64, float64) {
+	if len(xs) == 0 {
+		return 0, 0
+	}
+	sort.Float64s(xs)
+	pick := func(q float64) float64 {
+		i := int(q * float64(len(xs)-1))
+		if i < 0 {
+			i = 0
+		}
+		if i >= len(xs) {
+			i = len(xs) - 1
+		}
+		return xs[i]
+	}
+	return pick(lo), pick(hi)
 }
 
 // IsInsufficient reports whether err is the "not enough data yet" signal.

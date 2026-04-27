@@ -41,9 +41,10 @@ type Prediction struct {
 	WallP75        int     `json:"wall_p75"`
 	ActiveP25      int     `json:"active_p25"`
 	ActiveP75      int     `json:"active_p75"`
-	N              int     `json:"n"`                  // neighbors used
-	MaxSim         float64 `json:"max_sim,omitempty"`  // top neighbor similarity, knn only
+	N              int     `json:"n"`                       // neighbors used
+	MaxSim         float64 `json:"max_sim,omitempty"`       // top neighbor similarity (knn or regressor's bm25 feature)
 	Source         Source  `json:"source"`
+	SourceDetail   string  `json:"source_detail,omitempty"` // e.g. regressor variant ("gbdt"|"linear")
 	TaskType       string  `json:"task_type,omitempty"`
 	SessionID      string  `json:"session_id,omitempty"`
 }

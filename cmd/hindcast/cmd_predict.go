@@ -117,8 +117,13 @@ func formatPrediction(p predict.Prediction) string {
 		tag = "other"
 	}
 	src := string(p.Source)
-	if p.Source == predict.SourceKNN {
+	switch p.Source {
+	case predict.SourceKNN:
 		src = fmt.Sprintf("knn sim=%.2f", p.MaxSim)
+	case predict.SourceRegressor:
+		if p.SourceDetail != "" {
+			src = fmt.Sprintf("regressor:%s", p.SourceDetail)
+		}
 	}
 	return fmt.Sprintf("hindcast: ~%s wall / %s active%s · %s n=%d · %s",
 		wall, active, band, src, p.N, tag)
