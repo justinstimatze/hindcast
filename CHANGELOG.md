@@ -46,14 +46,26 @@ All four are `omitempty`, so older readers stay tolerant. Pre-v0.6.1
 entries are excluded from band-hit-rate computation; the report shows
 "not yet computable" until new entries accumulate.
 
+### Tier-aware variance flag
+
+`variance_gated` now means *the inject was rendered AND showed the band
+as headline* — not just *the predictor produced a wide band*. Tiers the
+inject doesn't surface (global / none) always log
+`variance_gated=false` regardless of band width, because Claude never
+saw them. Without this, a global-tier wide-band entry would be counted
+toward "variance-gated band hit rate," measuring something other than
+what was actually rendered. Caught immediately after v0.6.1's first
+production entry surfaced a global-source row with `variance_gated=true`.
+
 ### Tests
 
 - `internal/store/store_test.go:TestPendingBandFieldsRoundtrip` —
   PendingTurn round-trips the new fields through Write/Read.
 - `cmd/hindcast/cmd_admin_test.go:TestWithBandRows` — filter excludes
-  pre-v0.6.1 entries.
+  pre-v0.6.1 entries AND non-injecting tiers (global / none).
 - `cmd/hindcast/cmd_admin_test.go:TestBandHitRateComputation` — boundary
-  cases (inclusive bracket), point-vs-variance-gated split.
+  cases (inclusive bracket), point-vs-variance-gated split, all from
+  inject-eligible source tiers.
 
 ## [0.6.0] — unreleased — gated context injection + Stop-hook fallback + status line removed
 

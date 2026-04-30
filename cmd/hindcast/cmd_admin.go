@@ -298,12 +298,20 @@ func showAccuracy(projectFilter string) {
 	}
 }
 
-// withBandRows returns accuracy rows whose band fields are populated.
-// Older v0.6.0 entries don't have these fields and are excluded.
+// withBandRows returns accuracy rows whose band fields are populated
+// AND whose source tier is one the inject actually surfaces. Pre-v0.6.1
+// entries (no band fields) are excluded; global / none / unknown tier
+// entries are excluded because Claude never saw them — counting their
+// band against actual would be measuring something other than what was
+// rendered.
 func withBandRows(rs []accuracyRow) []accuracyRow {
 	out := make([]accuracyRow, 0, len(rs))
 	for _, r := range rs {
-		if r.PredictedWallP25 > 0 && r.PredictedWallP75 > 0 && r.ActualWall > 0 {
+		if r.PredictedWallP25 == 0 || r.PredictedWallP75 == 0 || r.ActualWall == 0 {
+			continue
+		}
+		switch r.Source {
+		case "regressor", "knn", "bucket", "project":
 			out = append(out, r)
 		}
 	}

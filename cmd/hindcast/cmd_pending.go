@@ -68,12 +68,21 @@ func cmdPending() {
 
 	pred := computePrediction(hash, tokens, taskType, in.SessionID, len(in.Prompt))
 
-	// Mirror the variance-gate logic from formatClaudeInjection so the
-	// pending file records what the inject actually surfaced. If the
-	// inject rendered the band (no point), record VarianceGated=true —
-	// the accuracy log uses this to compute band-hit-rate vs point MALR
-	// separately, since they target different things.
-	varianceGated := pred.WallP25 > 0 && pred.WallP75 > 0 && float64(pred.WallP75)/float64(pred.WallP25) > 3.0
+	// Mirror what formatClaudeInjection actually surfaces. variance_gated
+	// means *the inject was rendered AND it showed the band as headline*
+	// — false when the inject was suppressed by the tier gate (global /
+	// none) or the WallSeconds<=0 check. Without this tier-aware gating,
+	// global-tier high-variance predictions would count toward the
+	// "variance-gated band hit rate," which would be incoherent because
+	// Claude never saw them.
+	varianceGated := false
+	switch pred.Source {
+	case predict.SourceRegressor, predict.SourceKNN, predict.SourceBucket, predict.SourceProject:
+		if pred.WallSeconds > 0 && pred.WallP25 > 0 && pred.WallP75 > 0 &&
+			float64(pred.WallP75)/float64(pred.WallP25) > 3.0 {
+			varianceGated = true
+		}
+	}
 
 	if path, err := store.PendingPath(in.SessionID); err == nil {
 		p := store.PendingTurn{
