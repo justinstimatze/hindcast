@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.6.2] — unreleased — pending-per-turn (fix rapid-fire turn drops)
+
+### Headline
+
+Pending file is now keyed on `(session, start_ts_nanos)` instead of
+session alone. The single-pending-per-session design (`pending-<id>.json`)
+was being overwritten when a follow-up prompt arrived within milliseconds
+of the prior assistant finishing — by the time Stop fired for turn N, the
+pending had already been clobbered by turn N+1's UserPromptSubmit, so
+Stop's `since`-cutoff was set to a moment after the just-completed turn
+and silently logged "no turns since" instead of recording.
+
+This is exactly the failure mode that surfaced during rapid-fire
+multi-session use the night of v0.6.1: 30+ "no turns since" entries and
+zero "recorded:" entries across an evening of real conversation.
+
+### Fix
+
+- `store.PendingPath(sessionID, startTS)` now embeds the start timestamp
+  in the filename: `pending-<sessionID>-<unixNanos>.json`. Zero startTS
+  returns the legacy single-file shape so old in-flight pendings are
+  still readable post-upgrade.
+- `store.ListPendingForSession(sessionID)` globs both legacy and new
+  filename shapes, parses each, returns `[]PendingFile` sorted oldest-
+  first by `StartTS`. Corrupt files are skipped silently and cleaned by
+  the TTL sweeper.
+- `cmd_record.go doRecord` no longer reads a single pending. It finds
+  the latest completed turn in the transcript, then matches that turn
+  to the pending whose StartTS is closest to (and within ±10s of) the
+  turn's PromptTS. Unmatched pendings stay in place — they correspond
+  to canceled/interrupted prompts and get swept by the existing 6h TTL.
+- When no pending matches the latest turn (e.g., upgrade-time orphaned
+  state, missing UserPromptSubmit), doRecord falls through to the same
+  transcript-only fallback path used for shadowed-hook projects. That
+  path records without writing an accuracy.jsonl entry, since there's
+  no prediction to compare against.
+
+### Compat
+
+Sessions started under a pre-v0.6.2 binary continue to write to the old
+single-file pending path until they exit. Post-v0.6.2 Stop reads both
+patterns, so no in-flight data is lost across upgrade.
+
+### Tests
+
+- `internal/store/store_test.go:TestPendingPathTimestamped` —
+  PendingPath returns distinct paths for distinct startTS values; zero
+  startTS returns the legacy shape.
+- `TestListPendingForSessionSorts` — multi-pending session returns
+  oldest-first.
+- `TestListPendingForSessionPicksUpLegacy` — glob captures both pre-
+  v0.6.2 and v0.6.2 pending file shapes.
+
 ## [0.6.1] — unreleased — accuracy log captures band; band-hit-rate metric
 
 ### Headline

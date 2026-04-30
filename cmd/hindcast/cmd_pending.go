@@ -84,10 +84,11 @@ func cmdPending() {
 		}
 	}
 
-	if path, err := store.PendingPath(in.SessionID); err == nil {
+	startTS := time.Now().UTC()
+	if path, err := store.PendingPath(in.SessionID, startTS); err == nil {
 		p := store.PendingTurn{
 			SessionID:        in.SessionID,
-			StartTS:          time.Now().UTC(),
+			StartTS:          startTS,
 			TaskType:         taskType,
 			PromptTokens:     tokens,
 			PromptChars:      len(in.Prompt),

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -124,37 +125,75 @@ func doRecord(in recordInput) {
 	if in.SessionID == "" {
 		return
 	}
-	pendingPath, err := store.PendingPath(in.SessionID)
-	if err != nil {
-		hook.Logf("record", "pending path: %s", err)
-		return
-	}
-	pend, err := store.ReadPending(pendingPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// UserPromptSubmit hook didn't run (project has a local
-			// settings.json that overrides the global hook list).
-			// Reconstruct what we need from the transcript directly.
-			doRecordFallback(in)
-		} else {
-			hook.Logf("record", "read pending: %s", err)
-		}
-		return
-	}
-	defer os.Remove(pendingPath)
 
 	_ = store.SweepPending(6 * time.Hour)
 
-	turns, err := transcript.ParseTail(in.TranscriptPath, 2*1024*1024, pend.StartTS)
+	// v0.6.2: Stop fires once per completed turn. Find the latest
+	// completed turn in the transcript, then match it to the pending
+	// whose StartTS is closest to the turn's prompt timestamp. This
+	// replaces the single-pending-per-session design where rapid-fire
+	// follow-up prompts overwrote the previous turn's pending before
+	// Stop could read it, silently dropping completed turns.
+	turns, err := transcript.ParseTail(in.TranscriptPath, 2*1024*1024, time.Now().Add(-6*time.Hour))
 	if err != nil {
 		hook.Logf("record", "parse transcript: %s", err)
 		return
 	}
-	if len(turns) == 0 {
-		hook.Logf("record", "no turns since %s", pend.StartTS.Format(time.RFC3339))
+	// Find the most recent completed turn (has both prompt and assistant).
+	var turn transcript.Turn
+	found := false
+	for i := len(turns) - 1; i >= 0; i-- {
+		if turns[i].WallSeconds() > 0 {
+			turn = turns[i]
+			found = true
+			break
+		}
+	}
+	if !found {
+		// No completed turn — nothing to record. (Common: interrupted
+		// prompts, escape-canceled responses, multi-stop turns.)
 		return
 	}
-	turn := turns[0]
+
+	// Match this turn to one of the session's outstanding pendings.
+	// Pick the pending whose StartTS is closest to (and not after) the
+	// turn's PromptTS, within a generous tolerance for clock skew
+	// between the hook's time.Now() and CC's transcript timestamp.
+	pendings, _ := store.ListPendingForSession(in.SessionID)
+	var matched *store.PendingFile
+	const matchToleranceSec = 10
+	for i := range pendings {
+		delta := turn.PromptTS.Sub(pendings[i].StartTS).Seconds()
+		// pending's StartTS should be at-or-before the turn's PromptTS
+		// (the pending is written by UserPromptSubmit just before CC
+		// stamps the user message). Allow a small negative slop for
+		// clock skew. Reject pendings that are far in the future.
+		if delta < -matchToleranceSec || delta > 6*60*60 {
+			continue
+		}
+		if matched == nil || math.Abs(delta) < math.Abs(turn.PromptTS.Sub(matched.StartTS).Seconds()) {
+			matched = &pendings[i]
+		}
+	}
+
+	if matched == nil {
+		// No pending matches this turn — fall through to the same
+		// transcript-only fallback used when a project shadows the
+		// global hook. The fallback also sweeps stale pendings via
+		// the marker mechanism.
+		doRecordFallback(in)
+		return
+	}
+
+	pend, err := store.ReadPending(matched.Path)
+	if err != nil {
+		hook.Logf("record", "read pending: %s", err)
+		return
+	}
+	// Consume the matched pending. Any older unmatched pendings stay
+	// in place — they correspond to canceled/interrupted prompts and
+	// will get cleaned up by the SweepPending TTL (6h).
+	defer os.Remove(matched.Path)
 
 	// Claude's self-reported estimate (if any) — written by the
 	// hindcast_estimate MCP tool to a per-session file. Read and unlink.

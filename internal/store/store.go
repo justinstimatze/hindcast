@@ -143,7 +143,11 @@ func safeIdent(s string) string {
 	return s
 }
 
-func PendingPath(sessionID string) (string, error) {
+// PendingPath returns the per-turn pending file path. v0.6.2: filename
+// now embeds the start timestamp's nanosecond stamp so multiple in-flight
+// turns in the same session don't overwrite each other. If startTS is
+// zero, the legacy single-file shape is returned (read-side compat).
+func PendingPath(sessionID string, startTS time.Time) (string, error) {
 	clean := safeIdent(sessionID)
 	if clean == "" {
 		return "", fmt.Errorf("invalid session id")
@@ -152,7 +156,52 @@ func PendingPath(sessionID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "pending-"+clean+".json"), nil
+	if startTS.IsZero() {
+		return filepath.Join(dir, "pending-"+clean+".json"), nil
+	}
+	return filepath.Join(dir, fmt.Sprintf("pending-%s-%d.json", clean, startTS.UnixNano())), nil
+}
+
+// PendingFile pairs a pending file's path with the StartTS read from it,
+// so callers can sort and consume pendings in chronological order.
+type PendingFile struct {
+	Path    string
+	StartTS time.Time
+}
+
+// ListPendingForSession returns all pending files for the given session
+// (both legacy single-file and v0.6.2 timestamped form), parsed and
+// sorted oldest-first by StartTS. Corrupt files are skipped silently —
+// the SweepPending TTL cleans them up.
+//
+// The Stop hook uses this to match each just-completed turn to the
+// pending whose StartTS is closest to the turn's prompt timestamp,
+// rather than relying on a single-file race-prone design where the
+// next prompt's UserPromptSubmit overwrites the prior turn's pending
+// before Stop can consume it.
+func ListPendingForSession(sessionID string) ([]PendingFile, error) {
+	clean := safeIdent(sessionID)
+	if clean == "" {
+		return nil, fmt.Errorf("invalid session id")
+	}
+	dir, err := TmpDir()
+	if err != nil {
+		return nil, err
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "pending-"+clean+"*.json"))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PendingFile, 0, len(matches))
+	for _, m := range matches {
+		p, err := ReadPending(m)
+		if err != nil {
+			continue
+		}
+		out = append(out, PendingFile{Path: m, StartTS: p.StartTS})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartTS.Before(out[j].StartTS) })
+	return out, nil
 }
 
 func LockPath(hash string) (string, error) {
