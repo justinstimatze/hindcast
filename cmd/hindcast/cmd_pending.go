@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -67,10 +66,7 @@ func cmdPending() {
 		tokens = bm25.HashTokens(effective, salt)
 	}
 
-	// Compute prediction for the human via status line. Claude never sees
-	// this — it's written to disk for `hindcast statusline` to render.
 	pred := computePrediction(hash, tokens, taskType, in.SessionID, len(in.Prompt))
-	writeLastPrediction(in.SessionID, pred)
 
 	if path, err := store.PendingPath(in.SessionID); err == nil {
 		p := store.PendingTurn{
@@ -94,17 +90,104 @@ func cmdPending() {
 		hook.Logf("pending", "path: %s", err)
 	}
 
-	// Default post-v0.2: emit nothing to Claude. The lit review
-	// (Lou et al. 2024 on LLM anchoring; Vacareanu 2024 on retrieval
-	// vs regression) showed that our "inject a number, tell Claude to
-	// use it" mechanism is anchoring, not calibration — if the bucket
-	// is wrong, we confidently mislead. Product pivots to surfacing
-	// predictions to the human via status line, not into Claude's
-	// context. Legacy anchoring behavior stays available behind the
-	// HINDCAST_LEGACY_INJECT=1 flag so eval-api can A/B old-vs-new.
+	// Legacy v0.1 inject (full bucket-table) preserved for eval-api A/B.
 	if arm == store.ArmTreatment && os.Getenv("HINDCAST_LEGACY_INJECT") == "1" {
 		fmt.Print(hindcastPrior(in.Prompt, effective, in.CWD, in.SessionID))
+		return
 	}
+
+	// v0.6 minimum-viable inject. Decision recorded 2026-04-30: stock
+	// estimates were wildly inflated (anecdotal but consistent across a
+	// week of use); status-line-only didn't reach Claude; the predictor
+	// was calibrated but invisible. Re-introducing a small block — gated
+	// to non-global tiers and to non-pathological variance — trades a
+	// bounded anchoring risk for actually moving Claude's prior.
+	//
+	// Tier gate: skip global / none. Global is biased short on new
+	// projects (sketch dominated by maintainer/test sessions), so an
+	// anchor would flip the failure mode from "wildly over" to "wildly
+	// under" — same magnitude, opposite sign.
+	//
+	// Variance gate: if P75/P25 > 3, replace the point with the band as
+	// the headline. A high-spread interval is honest where a precise-
+	// looking point would falsely anchor.
+	//
+	// HINDCAST_INJECT=0 disables, default on.
+	if arm == store.ArmTreatment && os.Getenv("HINDCAST_INJECT") != "0" {
+		if s := formatClaudeInjection(pred); s != "" {
+			fmt.Println(s)
+		}
+	}
+}
+
+// formatClaudeInjection renders the prediction as a Claude-facing block
+// for UserPromptSubmit additionalContext. Returns "" when the tier or
+// variance gate trips.
+//
+// Tier gate notes:
+//   - regressor: per-prediction confidence is NOT gated — we rely on the
+//     global gate in health.json (regressor only fires when it beats the
+//     ladder by ≥15% on the user's held-out split). This means a specific
+//     prompt could still be off; the variance gate is the per-prediction
+//     backstop.
+//   - knn: predictor itself enforces sim ≥ 0.45 via tune'd threshold.
+//   - bucket / project: no per-prediction gate; rely on n ≥ 4 floor in
+//     the predictor and the variance gate here.
+func formatClaudeInjection(p predict.Prediction) string {
+	switch p.Source {
+	case predict.SourceRegressor, predict.SourceKNN, predict.SourceBucket, predict.SourceProject:
+	default:
+		return ""
+	}
+	if p.WallSeconds <= 0 {
+		return ""
+	}
+
+	src := string(p.Source)
+	switch p.Source {
+	case predict.SourceKNN:
+		src = fmt.Sprintf("knn sim=%.2f", p.MaxSim)
+	case predict.SourceRegressor:
+		if p.SourceDetail != "" {
+			src = "regressor:" + p.SourceDetail
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("Hindcast prediction for this turn (calibrated from your past sessions on similar prompts):\n")
+
+	// Active phrase: drop when zero. Records sometimes have active=0
+	// from transcript-parse edge cases; surfacing "~0s active" is a
+	// data-quality artifact, not a useful signal for Claude.
+	activePhrase := ""
+	if p.ActiveSeconds > 0 {
+		activePhrase = fmt.Sprintf(" · active ~%s", humanDuration(p.ActiveSeconds))
+	}
+
+	highVar := p.WallP25 > 0 && p.WallP75 > 0 && float64(p.WallP75)/float64(p.WallP25) > 3.0
+	if highVar {
+		fmt.Fprintf(&b, "  wall %s–%s (high uncertainty, no point estimate)%s\n",
+			humanDuration(p.WallP25), humanDuration(p.WallP75), activePhrase)
+	} else {
+		band := ""
+		if p.WallP25 > 0 && p.WallP75 > 0 && p.WallP75 >= p.WallP25 {
+			band = fmt.Sprintf(" (P25–P75: %s–%s)", humanDuration(p.WallP25), humanDuration(p.WallP75))
+		}
+		fmt.Fprintf(&b, "  wall ~%s%s%s\n",
+			humanDuration(p.WallSeconds), band, activePhrase)
+	}
+	fmt.Fprintf(&b, "  source: %s · n=%d", src, p.N)
+	if p.TaskType != "" {
+		fmt.Fprintf(&b, " · task=%s", p.TaskType)
+	}
+	b.WriteString("\n\n")
+	b.WriteString("If you give a wall-clock estimate this turn, cite this number in the form:\n")
+	b.WriteString("  \"~Xm wall (P25–P75: a–b, source n=N)\"\n")
+	b.WriteString("Use it as your baseline. Override only if the prompt has a structural reason\n")
+	b.WriteString("the predictor cannot see (much larger scope, blocked on long external\n")
+	b.WriteString("process, etc.) — say so explicitly. Do NOT pad the override out of caution;\n")
+	b.WriteString("decompose into verify-existing vs implement-fresh and estimate each tightly.")
+	return b.String()
 }
 
 // deliverBM25 prints one line of retrieval context for CC to inject.
@@ -265,28 +348,6 @@ func bandFromResiduals(pred int, resP25, resP75 float64) (int, int) {
 		high = low
 	}
 	return int(low + 0.5), int(high + 0.5)
-}
-
-// writeLastPrediction persists the current prediction to both a
-// per-session file and the active-session pointer so `hindcast
-// statusline` can find the latest value without a session arg.
-func writeLastPrediction(sessionID string, p predict.Prediction) {
-	path, err := store.LastPredictionPath(sessionID)
-	if err != nil {
-		hook.Logf("pending", "last-prediction path: %s", err)
-		return
-	}
-	data, err := json.Marshal(p)
-	if err != nil {
-		return
-	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		hook.Logf("pending", "last-prediction write: %s", err)
-		return
-	}
-	if ptr, err := store.CurrentSessionPointerPath(); err == nil {
-		_ = os.WriteFile(ptr, []byte(sessionID), 0600)
-	}
 }
 
 func firstLine(s string) string {

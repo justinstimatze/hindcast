@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/justinstimatze/hindcast/internal/bm25"
@@ -15,6 +17,7 @@ import (
 	"github.com/justinstimatze/hindcast/internal/regressor"
 	"github.com/justinstimatze/hindcast/internal/sizes"
 	"github.com/justinstimatze/hindcast/internal/store"
+	"github.com/justinstimatze/hindcast/internal/tags"
 	"github.com/justinstimatze/hindcast/internal/transcript"
 )
 
@@ -128,7 +131,14 @@ func doRecord(in recordInput) {
 	}
 	pend, err := store.ReadPending(pendingPath)
 	if err != nil {
-		hook.Logf("record", "read pending: %s", err)
+		if os.IsNotExist(err) {
+			// UserPromptSubmit hook didn't run (project has a local
+			// settings.json that overrides the global hook list).
+			// Reconstruct what we need from the transcript directly.
+			doRecordFallback(in)
+		} else {
+			hook.Logf("record", "read pending: %s", err)
+		}
 		return
 	}
 	defer os.Remove(pendingPath)
@@ -462,4 +472,176 @@ func loadRecordsByProjectSimple() (map[string][]store.Record, error) {
 		out[hash] = recs
 	}
 	return out, nil
+}
+
+// doRecordFallback is called when no pending file exists, which happens
+// when the project's local .claude/settings.json defines UserPromptSubmit
+// hooks and shadows the global hindcast pending hook. It reconstructs
+// what it needs from the transcript and the record input directly.
+//
+// No accuracy-log entry is written: there's no prediction to compare
+// against because hindcast pending never ran for this turn.
+func doRecordFallback(in recordInput) {
+	if in.SessionID == "" || in.TranscriptPath == "" {
+		return
+	}
+
+	_ = store.SweepPending(6 * time.Hour)
+
+	project := store.ResolveProject(in.CWD)
+	hash := store.ProjectHash(project)
+	arm := store.SessionArm(in.SessionID, store.ControlPctFromEnv())
+
+	// Use the fallback marker to find where we left off in this session,
+	// so we don't re-record a turn that a prior Stop already captured.
+	since := time.Now().Add(-2 * time.Hour)
+	markerPath := fallbackMarkerPath(in.SessionID)
+	if markerPath != "" {
+		if data, err := os.ReadFile(markerPath); err == nil {
+			if ts, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); err == nil {
+				since = ts.Add(time.Millisecond) // strictly after last recorded
+			}
+		}
+	}
+
+	turns, err := transcript.ParseTail(in.TranscriptPath, 4*1024*1024, since)
+	if err != nil {
+		hook.Logf("record", "fallback parse transcript: %s", err)
+		return
+	}
+	if len(turns) == 0 {
+		return
+	}
+
+	turn := turns[len(turns)-1]
+
+	// Skip degenerate turns (no wall time means the assistant never responded).
+	if turn.WallSeconds() == 0 {
+		return
+	}
+
+	var promptTokens []uint64
+	if turn.PromptText != "" {
+		if salt, err := store.GetSalt(); err == nil {
+			promptTokens = bm25.HashTokens(turn.PromptText, salt)
+		}
+	}
+
+	toolCount := 0
+	for _, n := range turn.ToolCalls {
+		toolCount += n
+	}
+
+	r := store.Record{
+		TS:                  time.Now().UTC(),
+		SessionID:           in.SessionID,
+		ProjectHash:         hash,
+		Model:               turn.Model,
+		PermissionMode:      in.PermissionMode,
+		TaskType:            string(tags.Classify(firstLine(turn.PromptText))),
+		SizeBucket:          string(sizes.Classify(turn.FilesTouched, toolCount)),
+		WallSeconds:         turn.WallSeconds(),
+		ClaudeActiveSeconds: turn.ActiveSeconds,
+		PromptChars:         len(turn.PromptText),
+		PromptTokens:        promptTokens,
+		ResponseChars:       turn.ResponseChars,
+		ToolCalls:           turn.ToolCalls,
+		FilesTouched:        turn.FilesTouched,
+		Arm:                 arm,
+	}
+
+	lockPath, err := store.LockPath(hash)
+	if err != nil {
+		hook.Logf("record", "fallback lock path: %s", err)
+		return
+	}
+	lock, err := store.AcquireLock(lockPath)
+	if err != nil {
+		hook.Logf("record", "fallback acquire lock: %s", err)
+		return
+	}
+	defer lock.Release()
+
+	// Advance the marker BEFORE the record append. Failure modes:
+	//   1. marker write fails → we exit; next call retries this turn.
+	//   2. marker write succeeds, append fails → we lose this record but
+	//      never duplicate it (next call's `since.Add(1ms)` filter
+	//      excludes the same turn).
+	//   3. all succeed → normal case.
+	// If we instead wrote marker AFTER append, a crash between append
+	// and marker write would re-record the turn next time, polluting
+	// the predictor with a duplicate. Lost-record is preferable to
+	// double-record because records are read-only inputs to a median —
+	// duplicates double-weight one observation, while a miss is just
+	// one fewer.
+	if markerPath != "" {
+		if err := os.WriteFile(markerPath, []byte(turn.PromptTS.Format(time.RFC3339Nano)), 0600); err != nil {
+			hook.Logf("record", "fallback marker write: %s", err)
+			return
+		}
+	}
+
+	logPath, err := store.ProjectLogPath(hash)
+	if err != nil {
+		hook.Logf("record", "fallback log path: %s", err)
+		return
+	}
+	if err := store.AppendRecord(logPath, r); err != nil {
+		hook.Logf("record", "fallback append: %s", err)
+		return
+	}
+
+	if err := rotateBM25IfNeeded(logPath, hash); err != nil {
+		hook.Logf("record", "fallback bm25 rotate: %s", err)
+	}
+	if err := updateBM25(hash, promptTokens, r, toolCount); err != nil {
+		hook.Logf("record", "fallback bm25 update: %s", err)
+	}
+	if err := updateSketch(r); err != nil {
+		hook.Logf("record", "fallback sketch update: %s", err)
+	}
+
+	hook.Logf("record",
+		"fallback recorded: session=%s project=%s task=%s wall=%ds active=%ds tools=%d files=%d",
+		r.SessionID, r.ProjectHash, r.TaskType,
+		r.WallSeconds, r.ClaudeActiveSeconds, toolCount, r.FilesTouched)
+
+	if sm, err := store.LoadSessionMomentum(r.SessionID); err == nil {
+		sm.AppendTurn(r.WallSeconds, r.ClaudeActiveSeconds)
+		_ = sm.Save()
+	}
+
+	if shouldRetune() {
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					hook.Logf("record", "fallback auto-tune PANIC %v", rec)
+				}
+			}()
+			byProject, err := loadRecordsByProjectSimple()
+			if err != nil {
+				return
+			}
+			sk, _ := store.LoadSketch()
+			h := health.Compute(byProject, sk, 20)
+			if m, err := regressor.Train(byProject, 20); err == nil {
+				_ = m.Save()
+			}
+			if lm, err := regressor.TrainLinearFromRecords(byProject, 20, 1.0); err == nil {
+				_ = lm.Save()
+			}
+			_ = h.Save()
+		}()
+	}
+}
+
+// fallbackMarkerPath returns the path to the per-session marker file
+// that tracks the PromptTS of the last turn recorded via doRecordFallback.
+// Returns "" on error (caller treats as no prior marker).
+func fallbackMarkerPath(sessionID string) string {
+	dir, err := store.SessionDirPath(sessionID)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "fallback-marker")
 }

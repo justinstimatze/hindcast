@@ -1,5 +1,95 @@
 # Changelog
 
+## [0.6.0] — unreleased — gated context injection + Stop-hook fallback + status line removed
+
+### Headline
+
+The status line is gone. `hindcast pending` now emits a calibrated prior
+into Claude's UserPromptSubmit additionalContext channel — the v0.1
+inject-into-Claude path, but with anchoring guards that didn't exist
+before. Claude reads the predicted band and is told to cite it in a
+specific form on any wall-clock estimate.
+
+### Anchoring guards
+
+Two gates trip when retrieval is likely wrong:
+
+- **Tier gate.** Injection fires only for `regressor / kNN / bucket /
+  project` sources. The cross-project `global` sketch and `none` tier
+  are silent — global p50 is biased short on new projects (sketch is
+  dominated by maintainer/test sessions), and an anchor would flip the
+  failure mode from "wildly over" to "wildly under" with the same
+  magnitude error and the opposite sign.
+- **Variance gate.** When `WallP75 / WallP25 > 3.0`, the injection
+  emits the band as the headline ("wall 1m–8m, high uncertainty") in
+  place of a point estimate. A wide interval is honest where a precise-
+  looking number would falsely anchor.
+
+The injection text additionally instructs Claude to cite predictions in
+`~Xm wall (P25–P75: a–b, source n=N)` form, override only on structural
+scope mismatch (and not on perceived complexity), and **not pad the
+override out of caution** — the over-estimation bias hindcast is meant
+to fix.
+
+`HINDCAST_INJECT=0` disables; `HINDCAST_LEGACY_INJECT=1` re-enables the
+v0.1 ungated full-bucket-table injection for A/B research.
+
+### Stop-hook fallback for shadowed UserPromptSubmit
+
+When a project's local `.claude/settings.json` defines its own
+UserPromptSubmit hooks, Claude Code merges by **replacement**, not
+union — a project-local UserPromptSubmit list shadows the global
+`hindcast pending` hook entirely. Prior to v0.6, this resulted in
+silent zero-record projects: Stop fired but found no pending file and
+gave up.
+
+v0.6 adds `doRecordFallback` in `cmd_record.go`. When Stop sees no
+pending file, it parses the transcript tail directly, hashes the prompt
+in-memory, and reconstructs the same Record the happy path would have
+produced. A per-session `fallback-marker` file tracks the last
+recorded `PromptTS` so re-fires don't double-count.
+
+No accuracy log entry is written from the fallback path — there is no
+prediction to compare against because `pending` never ran.
+
+### Status line removed
+
+`hindcast statusline` (subcommand) and `cmdStatusline` (binary) are
+deleted along with the supporting `writeLastPrediction` and
+`CurrentSessionPointerPath` paths. The store path builder
+`LastPredictionPath` was renamed `SessionDirPath` (it was always a
+directory; the old name was a vestige of the deleted prediction file).
+
+`hindcast install` migrates pre-v0.6 settings.json by removing any
+`statusLine` entry that points at `hindcast statusline`. User-customized
+statusLine commands are preserved. `hindcast uninstall` mirrors the
+cleanup so cruft from any version is removed on uninstall.
+
+### Privacy invariant preserved
+
+`formatClaudeInjection` reads only numeric `Prediction` fields. The
+fallback hashes prompts before any disk write. Two new regression tests
+enforce this:
+
+- `cmd/hindcast/cmd_pending_test.go` — table-driven tier gate, variance
+  gate, active-zero suppression, don't-pad guidance presence,
+  per-source label rendering.
+- `cmd/hindcast/cmd_record_test.go` — fallback writes no plaintext
+  (sentinel-string sweep over `~/.claude/hindcast/`), and
+  `fallback-marker` advances correctly to suppress duplicate recording.
+- `cmd/hindcast/cmd_install_test.go` — legacy statusLine migration is
+  applied to ours and not to user-customized entries.
+
+The existing `internal/store/store_test.go:TestRecordContainsNoPromptText`
+continues to pass.
+
+### Migration
+
+Existing users upgrading from v0.5 should run `hindcast install` (not
+just `go install`). The first install merges the legacy statusLine
+cleanup into settings.json. Without it, Claude Code's status bar
+displays "unknown command: statusline" on every prompt.
+
 ## [0.5.0] — unreleased — per-user adaptive tier selection + feature-leak fix
 
 ### Headline

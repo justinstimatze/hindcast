@@ -3,15 +3,20 @@
 > *"I departed London on the 2nd of October at 8:45 PM and returned on the 21st of December at 8:50 PM. Not 8:49. Not 8:51. I keep meticulous logs. You estimated an hour; it took four minutes. I find this — adjusts pocket watch — correctable."*
 > — Phileas Fogg, allegedly
 
-Claude Code's wall-clock estimates are not trustworthy for scheduling. The priors come from training — human engineers writing "refactor module = 2 days" — which is reasonable for a human and broken for an agent that finishes the same work in minutes. You can stop trusting the estimates entirely, or you can keep your own log and read it back.
+Claude Code's wall-clock estimates are not trustworthy for scheduling. The priors come from training — human engineers writing "refactor module = 2 days" — which is reasonable for a human and broken for an agent that finishes the same work in minutes. You can stop trusting the estimates entirely, or you can keep your own log and feed it back to Claude before it answers.
 
-hindcast is the log. Every turn's actual wall-clock and active-compute duration gets recorded. Before each turn runs, a local k-nearest-neighbors predictor matches the current prompt against past turns and renders a one-line estimate in your terminal's status bar — not in Claude's context, by deliberate design.
+hindcast is the log. Every turn's actual wall-clock and active-compute duration gets recorded. Before each turn runs, a local k-nearest-neighbors predictor matches the current prompt against past turns and injects a one-line calibrated prior into Claude's context — gated against anchoring failures.
 
-## Why not inject priors into Claude's context?
+## How the injection avoids anchoring
 
-The earlier version of hindcast did exactly that — injected bucket p75 stats into Claude's context and told it to use the number. The mechanism worked by exploiting LLM anchoring ([Lou et al. 2024](https://arxiv.org/abs/2412.06593)): models obey injected numbers 20–60% of the time regardless of whether the number is well-chosen. When the retrieval is right, that's calibration. When the retrieval is wrong, it's confident error. For a personal tool whose classifier is coarse, the wrong-retrieval case is common enough to be disqualifying.
+A naive context-injection ([Lou et al. 2024](https://arxiv.org/abs/2412.06593)) gets Claude to obey injected numbers 20–60% of the time regardless of whether the number is well-chosen. When retrieval is right, that's calibration. When retrieval is wrong, it's confident error. hindcast's injection is gated to suppress the wrong-retrieval cases:
 
-So hindcast v0.2 predicts numerically, locally, and surfaces the number to the **human**. Claude is never told. If you still want the anchoring mechanism, set `HINDCAST_LEGACY_INJECT=1`.
+- **Tier gate.** Fires only when the prediction comes from a calibrated source (regressor / kNN / task-type bucket / project median). The cross-project "global sketch" tier and the "no data" tier are silent — those are the cases where anchoring would dominate signal.
+- **Variance gate.** If `WallP75 / WallP25 > 3`, the injection emits the band as the headline ("wall 1m–8m, high uncertainty") in place of a point estimate. A wide interval is honest where a precise-looking number would falsely anchor.
+- **Citation form.** Claude is instructed to cite predictions as `~Xm wall (P25–P75: a–b, source n=N)`, surfacing provenance so you can spot when it's leaning on a thin sample.
+- **Override discipline.** Claude is told to override when the prompt has a structural reason the predictor cannot see (much larger scope, blocked on long external process), not on perceived complexity — and not to pad the override out of caution.
+
+Disable injection any time with `HINDCAST_INJECT=0`. Re-enable the v0.1 full-bucket-table injection (no gates) with `HINDCAST_LEGACY_INJECT=1`.
 
 ## Install
 
@@ -20,7 +25,7 @@ go install github.com/justinstimatze/hindcast/cmd/hindcast@latest
 hindcast install
 ```
 
-Two commands. Pure Go, no CGO, no network, ~5 MB binary. `install` merges three hooks + one MCP server + a `statusLine` entry into `~/.claude/settings.json` (timestamped backup), initializes a per-install salt, and backfills priors from your `~/.claude/projects/*/` history. Restart Claude Code and predictions render in the status line.
+Two commands. Pure Go, no CGO, no network, ~5 MB binary. `install` merges three hooks + one MCP server into `~/.claude/settings.json` (timestamped backup), initializes a per-install salt, and backfills priors from your `~/.claude/projects/*/` history. Restart Claude Code and the next turn's prompt gets a calibrated prior in Claude's context.
 
 To remove: `hindcast uninstall`.
 
@@ -29,19 +34,21 @@ To remove: `hindcast uninstall`.
 ```
 > Refactor the fetcher to use the new Client type.
 
-  [status line]  hindcast: ~3m wall / 45s active [1m–6m] · knn sim=0.42 n=5 · refactor
+  [hindcast prior, injected into Claude's context]
+    wall ~3m (P25–P75: 1m–6m) · active ~45s
+    source: knn sim=0.42 · n=5 · task=refactor
 
-Claude: I'll trace the fetcher's callers, update signatures,
-and run the test suite.
+Claude: ~3m wall (P25–P75: 1m–6m, knn n=5).
+        I'll trace the fetcher's callers, update signatures, and run the test suite.
 
   [running…]
 
 — actual: 4 minutes 12 seconds —
 ```
 
-The status line tells **you** to expect about three minutes. Claude thinks whatever it thinks; hindcast doesn't interfere with Claude's own output. You use the prediction to decide whether to stay at the keyboard or start the next human task in parallel.
+Without the prior, Claude's first-shot estimate tends to inflate — typical case is half-hour-to-hour ranges for work that finishes in single-digit minutes. With the prior, Claude cites the predicted number and lands inside the band. Fogg, *checking his pocket watch*: "Three minutes. Four minutes twelve. Satisfactory."
 
-Fogg, *checking his pocket watch*: "Three minutes. Four minutes twelve. Satisfactory."
+The size of the calibration lift is use-case-dependent and is not currently quantified by an A/B run against this exact injection format. The mechanism (anchoring) is documented in [Lou et al. 2024]; the gates above bound the failure case but do not eliminate it.
 
 ## The predictor
 
@@ -52,9 +59,9 @@ A BM25-weighted k-nearest-neighbors regressor over your own project's history. G
 2. **task-type bucket** — records classified into the same task type (refactor / debug / feature / test / docs / other), n ≥ 4.
 3. **overall project** — any record from the same project, n ≥ 4.
 4. **global sketch** — cross-project bootstrap prior, n=1000.
-5. **none** — status line says "no data yet."
+5. **none** — no data yet; injection is suppressed.
 
-Source is shown in the status line so you know what the number is grounded in.
+Source is shown in the injected prior so Claude (and you) can see what the number is grounded in.
 
 ### Measuring it — offline, in half a second
 
@@ -113,10 +120,9 @@ See [`SECURITY.md`](SECURITY.md) for the full threat model.
 ## Commands
 
 ```
-hindcast install                Wire hooks + MCP + statusLine + seed + backfill. Run once.
+hindcast install                Wire hooks + MCP + seed + backfill. Run once.
 hindcast uninstall              Reverse install. Drops data unless --keep-data.
 hindcast predict [PROMPT]       One-shot kNN prediction for a prompt (CLI / stdin).
-hindcast statusline             Render the active session's prediction. Wired into statusLine.
 hindcast show [--project P]     Recorded records and bucket stats.
 hindcast show --accuracy        Predictor MALR by source, from reconciliation log.
 hindcast status                 Hook health: hook.log tail, panic count, current arm.
@@ -142,7 +148,8 @@ hindcast is zero-config on the value path. These env vars exist for edge cases:
 |---|---|---|
 | `HINDCAST_SKIP` | unset | skip recording for this session entirely |
 | `HINDCAST_CONTROL_PCT` | 10 | percentage of sessions in A/B control arm (only relevant under legacy inject) |
-| `HINDCAST_LEGACY_INJECT` | unset | re-enable the deprecated context-injection mechanism for A/B or nostalgia |
+| `HINDCAST_INJECT` | unset (on) | set to `0` to suppress hook output to Claude (predictor still records turns) |
+| `HINDCAST_LEGACY_INJECT` | unset | re-enable the v0.1 ungated full-bucket-table injection (mostly for A/B research) |
 
 `.hindcast-project` in your project root overrides the default project name (useful for monorepos and symlinked trees).
 
@@ -157,7 +164,7 @@ Honest cross-corpus findings (~6,000 predictions across two public corpora):
 
 - **Architecture (per-project chronological history) generalizes.** Group-median MALR is comparable across corpora and matches what you'd see locally.
 - **The BM25 prompt-similarity mechanism is use-case-dependent.** It works well when prompts are evolving multi-turn task work (typical Claude Code use). It works poorly on independent-task corpora like SWE-bench Lite (BM25 sim picks up library-name overlap, not task overlap).
-- The single-threshold gate (`sim ≥ 0.5`) tuned on the maintainer's data does NOT generalize to all corpora. v0.3.1 ships `hindcast tune` (auto-runs from the Stop hook when `health.json` is stale): each install computes its own empirical cliff via prefix-LOO and persists it. View with `hindcast show --health`. The tuned threshold is computed but not yet wired into a text-injection gate; status line stays the universal default.
+- The single-threshold gate (`sim ≥ 0.5`) tuned on the maintainer's data does NOT generalize to all corpora. v0.3.1 ships `hindcast tune` (auto-runs from the Stop hook when `health.json` is stale): each install computes its own empirical cliff via prefix-LOO and persists it. View with `hindcast show --health`.
 
 If your usage looks like Claude Code (multi-turn project work), expect kNN to earn its keep. If you use Claude Code for one-shot independent tasks, the bucket/project tier may be the ceiling.
 
@@ -168,7 +175,7 @@ The regressor is the v0.4 universal-features design (prompt length, task type, r
 ## Known limitations
 
 - **Windows is build-only** — hooks use `syscall.Setsid` and `/tmp` conventions that are Linux/macOS only. CI verifies the binary compiles on Windows; `install` refuses to run there.
-- **Status line is terminal-only.** Web app and IDE-extension users won't see predictions; the status line is a Claude Code CLI feature.
+- **Anchoring is not eliminated, only bounded.** The variance and tier gates suppress the worst wrong-retrieval cases, but a confidently-wrong kNN match (sim ≥ the predictor's tuned floor — default 0.45 from `hindcast tune`) with a tight band still anchors. The variance gate is the main backstop. If you find Claude consistently parroting bad numbers, set `HINDCAST_INJECT=0` per-shell or open an issue with the bad-prediction example.
 - **NFS home directories** break the O_APPEND atomicity guarantee per-project JSONL writes rely on.
 - **BM25 stopwords are English-only.** Non-English prompts get less filtering → slightly noisier index, slightly weaker kNN retrieval.
 - **BM25 over salt-hashed tokens loses synonym signal.** "fix" and "repair" hash differently. Privacy/retrieval tradeoff is real and bounded.

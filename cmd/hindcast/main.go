@@ -14,7 +14,7 @@ import (
 	"github.com/justinstimatze/hindcast/internal/hook"
 )
 
-const version = "0.2.0-dev"
+const version = "0.6.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -58,8 +58,6 @@ func main() {
 		cmdRotateSalt(args[1:])
 	case "predict":
 		cmdPredict(args[1:])
-	case "statusline":
-		cmdStatusline(args[1:])
 	case "verify":
 		cmdVerify(args[1:])
 	case "bench-cross":
@@ -101,7 +99,6 @@ Usage:
   hindcast show --health         Display tuned predictor state.
   hindcast calibrate             Online A/B analysis (control vs treatment, legacy).
   hindcast predict [PROMPT]      One-shot kNN prediction for a prompt (CLI).
-  hindcast statusline            Render the latest session's prediction (status line).
 
 Hooks (invoked by Claude Code; not for manual use):
   hindcast pending               UserPromptSubmit — record turn start + BM25 delivery.

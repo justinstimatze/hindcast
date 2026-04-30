@@ -181,11 +181,10 @@ func EstimatePath(sessionID string) (string, error) {
 	return filepath.Join(dir, "estimate-"+clean+".json"), nil
 }
 
-// LastPredictionPath is where the UserPromptSubmit hook writes the
-// current turn's kNN prediction for the status line to consume.
-// Lives under HindcastDir() (persistent, not /tmp) so a fresh terminal
-// tail can show the last value even if /tmp was cleared.
-func LastPredictionPath(sessionID string) (string, error) {
+// SessionDirPath returns the per-session directory under
+// HindcastDir/sessions/<id>/, creating it if missing. Used by the
+// Stop-hook fallback marker.
+func SessionDirPath(sessionID string) (string, error) {
 	clean := safeIdent(sessionID)
 	if clean == "" {
 		return "", fmt.Errorf("invalid session id")
@@ -198,22 +197,7 @@ func LastPredictionPath(sessionID string) (string, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "last-prediction.json"), nil
-}
-
-// CurrentSessionPointerPath is a small pointer file updated on every
-// UserPromptSubmit naming the latest session id. Lets `hindcast
-// statusline` find the active session without needing the session id
-// as an argument.
-func CurrentSessionPointerPath() (string, error) {
-	root, err := HindcastDir()
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(root, 0700); err != nil {
-		return "", err
-	}
-	return filepath.Join(root, "current-session"), nil
+	return dir, nil
 }
 
 // AccuracyLogPath is the per-project reconciliation log where the Stop
