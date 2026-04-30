@@ -198,6 +198,43 @@ func TestPendingRoundtrip(t *testing.T) {
 	}
 }
 
+// v0.6.1: PendingTurn carries band fields (P25/P75, MaxSim, VarianceGated)
+// so the Stop hook can fold them into the accuracy log for band-hit-rate.
+// Verify they round-trip through WritePending/ReadPending.
+func TestPendingBandFieldsRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pending.json")
+	p := PendingTurn{
+		SessionID:        "s-band-42",
+		StartTS:          time.Now().UTC().Truncate(time.Second),
+		TaskType:         "feature",
+		ProjectHash:      "abc12345",
+		PredictedWall:    180,
+		PredictedActive:  60,
+		PredictionSrc:    "knn",
+		PredictedWallP25: 60,
+		PredictedWallP75: 600,
+		PredictedMaxSim:  0.71,
+		VarianceGated:    true,
+	}
+	if err := WritePending(path, p); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := ReadPending(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got.PredictedWallP25 != 60 || got.PredictedWallP75 != 600 {
+		t.Errorf("band p25/p75 lost in roundtrip: got %d/%d", got.PredictedWallP25, got.PredictedWallP75)
+	}
+	if got.PredictedMaxSim != 0.71 {
+		t.Errorf("max sim lost in roundtrip: got %v", got.PredictedMaxSim)
+	}
+	if !got.VarianceGated {
+		t.Errorf("variance_gated lost in roundtrip")
+	}
+}
+
 // Privacy invariant check: the persisted Record JSON must not contain
 // any prompt_first_line field. If someone reintroduces it, this fails.
 func TestRecordContainsNoPromptText(t *testing.T) {

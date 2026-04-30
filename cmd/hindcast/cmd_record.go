@@ -313,6 +313,21 @@ func appendAccuracyLine(hash string, pend store.PendingTurn, r store.Record) {
 		"actual_active":    r.ClaudeActiveSeconds,
 		"source":           pend.PredictionSrc,
 	}
+	// v0.6.1: capture band fields so band-hit-rate is computable
+	// post-hoc. Only include when populated, to keep older readers
+	// tolerant of the schema change.
+	if pend.PredictedWallP25 > 0 {
+		row["predicted_wall_p25"] = pend.PredictedWallP25
+	}
+	if pend.PredictedWallP75 > 0 {
+		row["predicted_wall_p75"] = pend.PredictedWallP75
+	}
+	if pend.PredictedMaxSim > 0 {
+		row["predicted_max_sim"] = pend.PredictedMaxSim
+	}
+	if pend.VarianceGated {
+		row["variance_gated"] = true
+	}
 	data, err := json.Marshal(row)
 	if err != nil {
 		return

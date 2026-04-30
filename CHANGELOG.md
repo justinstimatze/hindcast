@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.6.1] — unreleased — accuracy log captures band; band-hit-rate metric
+
+### Headline
+
+`accuracy.jsonl` now records the predicted P25/P75 band, max BM25 sim, and
+a `variance_gated` flag alongside the point estimate. `hindcast show
+--accuracy` reports band hit rate (actual ∈ [P25, P75]) split by inject
+mode (point-rendered vs variance-gated). This is the metric that targets
+what Claude actually saw — point MALR penalizes regression-to-the-mean on
+tail outliers, but the inject suppresses the point behind the variance
+gate when the band is wide.
+
+### Why this matters
+
+Live point-MALR was 4.45× in the v0.6.0 ship snapshot, while `hindcast
+verify` (prefix-LOO synthetic over backfilled records) reported 1.61×.
+Decomposing by actual-duration bucket showed the gap is structural: kNN
+regresses tail outliers (very-short or very-long real turns) toward the
+central tendency, so a 10-second real turn matched to neighbors with
+median 2 minutes scores as a 12× miss even though the prediction was
+honest about the central tendency.
+
+The variance gate suppresses point estimates in those cases (the inject
+emits the band as the headline instead). But accuracy.jsonl was only
+logging the point — measuring something the inject doesn't actually
+surface to Claude. v0.6.1 captures the band and computes a hit-rate
+metric that matches what Claude saw.
+
+### Schema
+
+`accuracy.jsonl` entries now optionally include:
+
+```json
+{
+  "predicted_wall_p25": 30,
+  "predicted_wall_p75": 90,
+  "predicted_max_sim": 0.71,
+  "variance_gated": true,
+  ...
+}
+```
+
+All four are `omitempty`, so older readers stay tolerant. Pre-v0.6.1
+entries are excluded from band-hit-rate computation; the report shows
+"not yet computable" until new entries accumulate.
+
+### Tests
+
+- `internal/store/store_test.go:TestPendingBandFieldsRoundtrip` —
+  PendingTurn round-trips the new fields through Write/Read.
+- `cmd/hindcast/cmd_admin_test.go:TestWithBandRows` — filter excludes
+  pre-v0.6.1 entries.
+- `cmd/hindcast/cmd_admin_test.go:TestBandHitRateComputation` — boundary
+  cases (inclusive bracket), point-vs-variance-gated split.
+
 ## [0.6.0] — unreleased — gated context injection + Stop-hook fallback + status line removed
 
 ### Headline

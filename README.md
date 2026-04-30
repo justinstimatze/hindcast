@@ -84,7 +84,7 @@ Exit code 0 on PASS, 1 on FAIL, 2 on UNDETERMINED (not enough data). Lift thresh
 
 ### Measuring it — live
 
-`hindcast show --accuracy` reads the per-project reconciliation log (predicted vs actual on every completed turn since you installed v0.2) and reports MALR by prediction source.
+`hindcast show --accuracy` reads the per-project reconciliation log (predicted vs actual on every completed turn since you installed v0.2) and reports MALR by prediction source plus band hit rate.
 
 ```
 $ hindcast show --accuracy
@@ -97,9 +97,18 @@ knn            83      1.52x         1.73x       0.94x
 bucket         41      2.10x         2.41x       1.06x
 project        13      2.97x         3.15x       1.11x
 global          5      4.20x         4.66x       1.40x
+
+band hit rate (actual ∈ [P25, P75]): 47/83  (57%)
+  point-rendered:    32/52  (62%)  ← inject showed a point; band is the implied confidence interval
+  variance-gated:    15/31  (48%)  ← inject showed only the band; this is the metric that matches what Claude saw
 ```
 
-1.00× is a perfect prediction. The expected ordering is kNN < bucket < project < global — if yours is inverted, the predictor's stratification isn't earning its keep and you should tell me.
+**Two metrics, two questions:**
+
+- **MALR** measures the *point estimate* against actual. Useful for diagnosing systematic bias, but penalizes regression-to-the-mean on tail outliers (kNN takes a weighted-median of neighbors, so a real 10-second turn matched to neighbors with median 2 minutes will look 12× off — even when the prediction was honest about the central tendency). 1.00× is perfect.
+- **Band hit rate** measures whether the actual fell inside the injected `[P25, P75]` band. This is the metric the inject actually targets — when the band is wide, the variance gate suppresses the point and Claude sees the band as the headline. So band hit rate is what matches what Claude saw. 50% is what a perfectly-calibrated quartile band predicts in expectation; consistent &gt; 50% means the band is wider than the truth distribution (under-confident); &lt; 50% means it's narrower (over-confident).
+
+The expected MALR ordering is kNN &lt; bucket &lt; project &lt; global — if yours is inverted, the predictor's stratification isn't earning its keep and you should tell me. Band fields populate from v0.6.1 forward; older entries are reported as "not yet computable."
 
 ## Privacy, by construction
 

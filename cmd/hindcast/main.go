@@ -14,7 +14,7 @@ import (
 	"github.com/justinstimatze/hindcast/internal/hook"
 )
 
-const version = "0.6.0-dev"
+const version = "0.6.1-dev"
 
 func main() {
 	if len(os.Args) < 2 {

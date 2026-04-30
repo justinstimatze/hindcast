@@ -68,20 +68,31 @@ func cmdPending() {
 
 	pred := computePrediction(hash, tokens, taskType, in.SessionID, len(in.Prompt))
 
+	// Mirror the variance-gate logic from formatClaudeInjection so the
+	// pending file records what the inject actually surfaced. If the
+	// inject rendered the band (no point), record VarianceGated=true —
+	// the accuracy log uses this to compute band-hit-rate vs point MALR
+	// separately, since they target different things.
+	varianceGated := pred.WallP25 > 0 && pred.WallP75 > 0 && float64(pred.WallP75)/float64(pred.WallP25) > 3.0
+
 	if path, err := store.PendingPath(in.SessionID); err == nil {
 		p := store.PendingTurn{
-			SessionID:       in.SessionID,
-			StartTS:         time.Now().UTC(),
-			TaskType:        taskType,
-			PromptTokens:    tokens,
-			PromptChars:     len(in.Prompt),
-			PermissionMode:  in.PermissionMode,
-			ProjectHash:     hash,
-			CWD:             in.CWD,
-			Arm:             arm,
-			PredictedWall:   pred.WallSeconds,
-			PredictedActive: pred.ActiveSeconds,
-			PredictionSrc:   string(pred.Source),
+			SessionID:        in.SessionID,
+			StartTS:          time.Now().UTC(),
+			TaskType:         taskType,
+			PromptTokens:     tokens,
+			PromptChars:      len(in.Prompt),
+			PermissionMode:   in.PermissionMode,
+			ProjectHash:      hash,
+			CWD:              in.CWD,
+			Arm:              arm,
+			PredictedWall:    pred.WallSeconds,
+			PredictedActive:  pred.ActiveSeconds,
+			PredictionSrc:    string(pred.Source),
+			PredictedWallP25: pred.WallP25,
+			PredictedWallP75: pred.WallP75,
+			PredictedMaxSim:  pred.MaxSim,
+			VarianceGated:    varianceGated,
 		}
 		if err := store.WritePending(path, p); err != nil {
 			hook.Logf("pending", "write pending: %s", err)

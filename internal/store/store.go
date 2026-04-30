@@ -789,6 +789,16 @@ type PendingTurn struct {
 	PredictedWall   int    `json:"predicted_wall,omitempty"`
 	PredictedActive int    `json:"predicted_active,omitempty"`
 	PredictionSrc   string `json:"prediction_src,omitempty"`
+
+	// Band fields so the accuracy log can compute a band-hit-rate metric
+	// alongside point MALR. Without these, accuracy.jsonl only measures
+	// the point estimate — which the inject suppresses behind the
+	// variance gate when the band is wide. The band is what Claude
+	// actually sees, so it's the more meaningful target.
+	PredictedWallP25 int     `json:"predicted_wall_p25,omitempty"`
+	PredictedWallP75 int     `json:"predicted_wall_p75,omitempty"`
+	PredictedMaxSim  float64 `json:"predicted_max_sim,omitempty"`
+	VarianceGated    bool    `json:"variance_gated,omitempty"` // true when inject rendered the band as headline (no point shown)
 }
 
 func WritePending(path string, p PendingTurn) error {
