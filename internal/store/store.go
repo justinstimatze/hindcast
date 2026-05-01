@@ -846,6 +846,11 @@ type PendingTurn struct {
 	// actually sees, so it's the more meaningful target.
 	PredictedWallP25 int     `json:"predicted_wall_p25,omitempty"`
 	PredictedWallP75 int     `json:"predicted_wall_p75,omitempty"`
+	// v0.6.3: wider quantiles, rendered as the band when variance gate
+	// trips. Hit rate against [P10, P90] should track ~80% on calibrated
+	// kNN distributions; against [P25, P75] tracks 50%.
+	PredictedWallP10 int     `json:"predicted_wall_p10,omitempty"`
+	PredictedWallP90 int     `json:"predicted_wall_p90,omitempty"`
 	PredictedMaxSim  float64 `json:"predicted_max_sim,omitempty"`
 	VarianceGated    bool    `json:"variance_gated,omitempty"` // true when inject rendered the band as headline (no point shown)
 }

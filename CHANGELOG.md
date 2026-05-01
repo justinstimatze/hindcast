@@ -1,5 +1,103 @@
 # Changelog
 
+## [0.6.3] — unreleased — wider bands, freshness weighting, dynamic variance gate
+
+### Headline
+
+Three independent moves to handle the project-and-day-by-day calibration
+drift surfaced in v0.6.2's first real data window. v0.6.2 unstuck
+recording; v0.6.3 makes the inject *useful* across drifting projects
+without over-fitting to one weird week.
+
+### A — Wider quantile band when uncertain
+
+The kNN tier now computes `WallP10/WallP90` (and Active counterparts)
+alongside `WallP25/WallP75`. When the variance gate trips, the inject
+renders the wider `[P10, P90]` band as the headline:
+
+```
+wall 30s–8m (high uncertainty, no point estimate; P10–P90 band)
+```
+
+A calibrated P10/P90 band hits 80% of actuals by definition; a
+calibrated P25/P75 band hits 50%. Rendering the wider band when the
+predictor is already uncertain means the surface to Claude is honest
+about the spread without committing to a precise-looking point.
+
+The accuracy log captures both quartile pairs; `hindcast show
+--accuracy` now reports band hit rate against the *rendered* band
+(P10/P90 for variance-gated, P25/P75 for point), with target hit
+rates labeled in the output.
+
+### B — Freshness weighting in kNN
+
+`bm25.Doc.TS` is now populated when a record enters the index (live
+record + happy-path Stop + fallback Stop + backfill). `predict.Predict`
+multiplies each kNN match's BM25 sim by an exponential recency factor
+with a 60-day half-life:
+
+  `weight = sim × 2^(-age_days / halfLife)`
+
+Recent turns weighted ~2x heavier than two-month-old turns; week-old
+turns at ~92%. Conservative on purpose: enough to catch genuine project
+drift without swinging on one anomalous week. Override via
+`HINDCAST_FRESHNESS_HALFLIFE_DAYS` env var; ≤0 disables.
+
+Pre-v0.6.3 records have zero TS and weight 1.0 (neutral) — existing
+indexes don't degrade until they refresh.
+
+### C — Dynamic variance gate threshold
+
+The variance gate threshold (P75/P25 ratio) was a hard 3.0. v0.6.3
+makes it dynamic: kNN matches with small samples (n<5) or low BM25
+similarity (max_sim<0.4) drop the threshold to 2.0. The intuition:
+when the underlying signal is itself uncertain (thin neighbors, weak
+match), the inject should surface the band more readily rather than
+commit to a point estimate the predictor can't really back.
+
+Bucket / project / regressor tiers keep the base 3.0 threshold —
+those tiers don't have a per-prediction confidence signal to act on.
+
+### Why all three together
+
+- **A alone** widens the band on already-uncertain cases — useful when
+  the kNN's neighbor distribution does span reality but P25/P75 cut it
+  off.
+- **B alone** shifts the kNN's median toward recent reality, useful
+  when a project's distribution has drifted (psychosis-ismyaialive
+  case from the v0.6.2 data: kNN was matching against past short
+  turns, missing that recent turns are 3-5× longer).
+- **C alone** trips the variance gate more often on weak-signal
+  predictions, which then renders A's wider band.
+
+A + B + C compose: B fixes the *center* of the distribution under
+drift, A widens *what gets shown* when uncertainty is high, C decides
+*when uncertainty is high*. None of the three tunes a feature
+weight against feedback — there's no model to overfit, just rendering
+choices over the existing weighted-quantile data.
+
+### Tests
+
+- `internal/predict/predict_test.go:TestPredictKNNComputesWideQuantiles`
+  — kNN populates ordered P10<P25≤median≤P75<P90.
+- `TestRecencyWeight` — recencyWeight returns 1.0 for zero TS, exp
+  decay for non-zero, ≥1.0 floor for clock-skew safety.
+- `TestPredictKNNFreshnessShiftsMedianTowardRecent` — mixed-age
+  neighbors: half from 6 months ago short, half today long → median
+  pulled toward recent values.
+- `cmd/hindcast/cmd_pending_test.go:TestFormatClaudeInjectionDynamicVarianceThreshold`
+  — large-n + ratio 2.5 stays point; small-n + same ratio trips
+  (lowered threshold); low-sim same; non-kNN unaffected.
+- `TestFormatClaudeInjectionRendersWidePercentilesWhenAvailable` —
+  variance gate uses P10/P90 when populated, falls back to P25/P75.
+
+### Schema
+
+`accuracy.jsonl` entries optionally include `predicted_wall_p10`,
+`predicted_wall_p90`. `bm25.Doc` has a new `TS` field (gob-encoded;
+older indexes default to zero TS, which means freshness-neutral).
+Forward-compat: pre-v0.6.3 readers ignore the new fields.
+
 ## [0.6.2] — unreleased — pending-per-turn (fix rapid-fire turn drops)
 
 ### Headline

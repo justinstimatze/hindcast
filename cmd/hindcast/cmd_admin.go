@@ -148,8 +148,20 @@ type accuracyRow struct {
 	Source           string  `json:"source"`
 	PredictedWallP25 int     `json:"predicted_wall_p25,omitempty"`
 	PredictedWallP75 int     `json:"predicted_wall_p75,omitempty"`
+	PredictedWallP10 int     `json:"predicted_wall_p10,omitempty"`
+	PredictedWallP90 int     `json:"predicted_wall_p90,omitempty"`
 	PredictedMaxSim  float64 `json:"predicted_max_sim,omitempty"`
 	VarianceGated    bool    `json:"variance_gated,omitempty"`
+}
+
+// renderedBand returns the (low, high) band the inject actually
+// surfaced to Claude for this row. Variance-gated turns get the wider
+// [P10, P90] when populated (v0.6.3+); otherwise [P25, P75].
+func (r accuracyRow) renderedBand() (int, int) {
+	if r.VarianceGated && r.PredictedWallP10 > 0 && r.PredictedWallP90 > 0 {
+		return r.PredictedWallP10, r.PredictedWallP90
+	}
+	return r.PredictedWallP25, r.PredictedWallP75
 }
 
 // showAccuracy aggregates accuracy.jsonl across one or all projects and
@@ -267,7 +279,8 @@ func showAccuracy(projectFilter string) {
 		pointN := 0
 		pointHits := 0
 		for _, r := range withBand {
-			inBand := r.ActualWall >= r.PredictedWallP25 && r.ActualWall <= r.PredictedWallP75
+			lo, hi := r.renderedBand()
+			inBand := r.ActualWall >= lo && r.ActualWall <= hi
 			if inBand {
 				hits++
 			}
@@ -283,15 +296,23 @@ func showAccuracy(projectFilter string) {
 				}
 			}
 		}
-		fmt.Printf("\nband hit rate (actual ∈ [P25, P75]): %d/%d  (%.0f%%)\n",
+		fmt.Printf("\nband hit rate (actual ∈ rendered band): %d/%d  (%.0f%%)\n",
 			hits, len(withBand), 100*float64(hits)/float64(len(withBand)))
 		if pointN > 0 {
-			fmt.Printf("  point-rendered:    %d/%d  (%.0f%%)  ← inject showed a point; band is the implied confidence interval\n",
+			fmt.Printf("  point-rendered  [P25, P75]:  %d/%d  (%.0f%%)  ← inject showed a point; band is the implied 50%% interval (target ≈50%%)\n",
 				pointHits, pointN, 100*float64(pointHits)/float64(pointN))
 		}
 		if varianceGatedN > 0 {
-			fmt.Printf("  variance-gated:    %d/%d  (%.0f%%)  ← inject showed only the band; this is the metric that matches what Claude saw\n",
-				varianceGatedHits, varianceGatedN, 100*float64(varianceGatedHits)/float64(varianceGatedN))
+			// Pick the label based on what the entries actually rendered.
+			label := "[P25, P75]"
+			for _, r := range withBand {
+				if r.VarianceGated && r.PredictedWallP10 > 0 && r.PredictedWallP90 > 0 {
+					label = "[P10, P90]"
+					break
+				}
+			}
+			fmt.Printf("  variance-gated  %s:  %d/%d  (%.0f%%)  ← inject showed only the band (target ≈80%% if P10/P90, ≈50%% if P25/P75)\n",
+				label, varianceGatedHits, varianceGatedN, 100*float64(varianceGatedHits)/float64(varianceGatedN))
 		}
 	} else {
 		fmt.Printf("\nband hit rate: not yet computable — accuracy.jsonl entries before v0.6.1 lack band fields. Will populate as new turns record.\n")

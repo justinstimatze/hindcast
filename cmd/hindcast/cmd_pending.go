@@ -78,9 +78,15 @@ func cmdPending() {
 	varianceGated := false
 	switch pred.Source {
 	case predict.SourceRegressor, predict.SourceKNN, predict.SourceBucket, predict.SourceProject:
-		if pred.WallSeconds > 0 && pred.WallP25 > 0 && pred.WallP75 > 0 &&
-			float64(pred.WallP75)/float64(pred.WallP25) > 3.0 {
-			varianceGated = true
+		if pred.WallSeconds > 0 && pred.WallP25 > 0 && pred.WallP75 > 0 {
+			// Dynamic threshold: small-n / low-sim kNN matches trip more easily.
+			th := 3.0
+			if pred.Source == predict.SourceKNN && (pred.N < 5 || pred.MaxSim < 0.4) {
+				th = 2.0
+			}
+			if float64(pred.WallP75)/float64(pred.WallP25) > th {
+				varianceGated = true
+			}
 		}
 	}
 
@@ -101,6 +107,8 @@ func cmdPending() {
 			PredictionSrc:    string(pred.Source),
 			PredictedWallP25: pred.WallP25,
 			PredictedWallP75: pred.WallP75,
+			PredictedWallP10: pred.WallP10,
+			PredictedWallP90: pred.WallP90,
 			PredictedMaxSim:  pred.MaxSim,
 			VarianceGated:    varianceGated,
 		}
@@ -185,10 +193,31 @@ func formatClaudeInjection(p predict.Prediction) string {
 		activePhrase = fmt.Sprintf(" · active ~%s", humanDuration(p.ActiveSeconds))
 	}
 
-	highVar := p.WallP25 > 0 && p.WallP75 > 0 && float64(p.WallP75)/float64(p.WallP25) > 3.0
+	// v0.6.3: dynamic variance gate threshold. The base threshold is
+	// 3.0 (P75/P25 > 3 means a wide-enough spread that a point estimate
+	// would be falsely precise). Small-sample or low-confidence kNN
+	// matches drop the threshold to 2.0 — the underlying signal is
+	// inherently noisier at low n / low sim, so the inject should
+	// surface the band more readily rather than commit to a point.
+	threshold := 3.0
+	if p.Source == predict.SourceKNN && (p.N < 5 || p.MaxSim < 0.4) {
+		threshold = 2.0
+	}
+	highVar := p.WallP25 > 0 && p.WallP75 > 0 && float64(p.WallP75)/float64(p.WallP25) > threshold
 	if highVar {
-		fmt.Fprintf(&b, "  wall %s–%s (high uncertainty, no point estimate)%s\n",
-			humanDuration(p.WallP25), humanDuration(p.WallP75), activePhrase)
+		// v0.6.3: render the wider [P10, P90] when the variance gate
+		// trips (when present — only kNN populates the wide quantiles).
+		// A calibrated [P10, P90] hits ~80% of actuals vs ~50% for
+		// [P25, P75], which is the "useful without overfitting" target.
+		// Falls back to [P25, P75] when wide quantiles aren't populated.
+		lo, hi := p.WallP25, p.WallP75
+		bandLabel := "P25–P75"
+		if p.WallP10 > 0 && p.WallP90 > 0 {
+			lo, hi = p.WallP10, p.WallP90
+			bandLabel = "P10–P90"
+		}
+		fmt.Fprintf(&b, "  wall %s–%s (high uncertainty, no point estimate; %s band)%s\n",
+			humanDuration(lo), humanDuration(hi), bandLabel, activePhrase)
 	} else {
 		band := ""
 		if p.WallP25 > 0 && p.WallP75 > 0 && p.WallP75 >= p.WallP25 {

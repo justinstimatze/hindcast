@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -49,6 +50,10 @@ type Doc struct {
 	SizeBucket    string
 	ToolCount     int
 	FilesTouched  int
+	// v0.6.3: turn timestamp for kNN freshness weighting. Zero on
+	// pre-v0.6.3 docs — predict.Predict treats those as freshness-
+	// neutral so existing indexes don't degrade until they refresh.
+	TS time.Time `json:"ts,omitempty"`
 }
 
 type Index struct {

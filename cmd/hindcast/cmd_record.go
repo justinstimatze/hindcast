@@ -361,6 +361,12 @@ func appendAccuracyLine(hash string, pend store.PendingTurn, r store.Record) {
 	if pend.PredictedWallP75 > 0 {
 		row["predicted_wall_p75"] = pend.PredictedWallP75
 	}
+	if pend.PredictedWallP10 > 0 {
+		row["predicted_wall_p10"] = pend.PredictedWallP10
+	}
+	if pend.PredictedWallP90 > 0 {
+		row["predicted_wall_p90"] = pend.PredictedWallP90
+	}
 	if pend.PredictedMaxSim > 0 {
 		row["predicted_max_sim"] = pend.PredictedMaxSim
 	}
@@ -398,6 +404,7 @@ func updateBM25(hash string, promptHashes []uint64, r store.Record, toolCount in
 		SizeBucket:    r.SizeBucket,
 		ToolCount:     toolCount,
 		FilesTouched:  r.FilesTouched,
+		TS:            r.TS,
 	})
 	return idx.Save(path)
 }
@@ -457,6 +464,7 @@ func rotateBM25IfNeeded(logPath, hash string) error {
 			SizeBucket:    r.SizeBucket,
 			ToolCount:     toolCount,
 			FilesTouched:  r.FilesTouched,
+			TS:            r.TS,
 		})
 	}
 	return fresh.Save(bm25Path)

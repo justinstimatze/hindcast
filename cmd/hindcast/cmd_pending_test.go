@@ -219,6 +219,97 @@ func TestFormatClaudeInjectionVarianceBoundary(t *testing.T) {
 	}
 }
 
+// v0.6.3: dynamic variance gate threshold. The base threshold is
+// P75/P25 > 3.0; small-n (<5) or low-sim (<0.4) kNN matches drop to 2.0.
+// This expresses "the predictor is uncertain about this turn anyway, so
+// surface the band rather than commit to a point."
+func TestFormatClaudeInjectionDynamicVarianceThreshold(t *testing.T) {
+	// Ratio = 2.5 (P75/P25 = 100/40). Above the small-n threshold (2.0)
+	// but below the base threshold (3.0). Behavior depends on n / MaxSim.
+	cases := []struct {
+		name       string
+		p          predict.Prediction
+		wantPoint  bool // true: point estimate rendered (no high-uncertainty)
+	}{
+		{
+			"large-n, high-sim → point rendered (ratio 2.5 < base 3.0)",
+			predict.Prediction{
+				Source: predict.SourceKNN, WallSeconds: 60,
+				WallP25: 40, WallP75: 100, N: 10, MaxSim: 0.7,
+			},
+			true,
+		},
+		{
+			"small-n trips lowered threshold (ratio 2.5 > 2.0)",
+			predict.Prediction{
+				Source: predict.SourceKNN, WallSeconds: 60,
+				WallP25: 40, WallP75: 100, N: 3, MaxSim: 0.7,
+			},
+			false,
+		},
+		{
+			"low-sim trips lowered threshold (ratio 2.5 > 2.0)",
+			predict.Prediction{
+				Source: predict.SourceKNN, WallSeconds: 60,
+				WallP25: 40, WallP75: 100, N: 10, MaxSim: 0.3,
+			},
+			false,
+		},
+		{
+			"non-kNN tier uses base threshold regardless of n",
+			predict.Prediction{
+				Source: predict.SourceBucket, WallSeconds: 60,
+				WallP25: 40, WallP75: 100, N: 3,
+			},
+			true, // bucket tier doesn't get the small-n drop
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := formatClaudeInjection(c.p)
+			highVar := strings.Contains(got, "high uncertainty")
+			if c.wantPoint && highVar {
+				t.Errorf("expected point estimate, got high-uncertainty band:\n%s", got)
+			}
+			if !c.wantPoint && !highVar {
+				t.Errorf("expected variance gate to trip, got point estimate:\n%s", got)
+			}
+		})
+	}
+}
+
+// v0.6.3: when the variance gate trips and WallP10/WallP90 are
+// populated, the inject renders the wider [P10, P90] band as the
+// headline. Falls back to [P25, P75] if wide quantiles aren't there
+// (e.g., bucket / project tiers, or pre-v0.6.3 readers).
+func TestFormatClaudeInjectionRendersWidePercentilesWhenAvailable(t *testing.T) {
+	withWide := predict.Prediction{
+		Source: predict.SourceKNN, WallSeconds: 120,
+		WallP25: 60, WallP75: 200, // ratio 3.33 — trips base
+		WallP10: 30, WallP90: 480,
+		N: 7, MaxSim: 0.5,
+	}
+	got := formatClaudeInjection(withWide)
+	if !strings.Contains(got, "P10–P90 band") {
+		t.Errorf("expected P10–P90 label in headline, got:\n%s", got)
+	}
+	// And the rendered numbers are P10/P90, not P25/P75.
+	if !strings.Contains(got, "30s") || !strings.Contains(got, "8m") {
+		t.Errorf("expected 30s and 8m (P10/P90 boundaries) in band, got:\n%s", got)
+	}
+
+	withoutWide := predict.Prediction{
+		Source: predict.SourceBucket, WallSeconds: 120,
+		WallP25: 60, WallP75: 200, // ratio 3.33
+		// No P10/P90 (bucket tier)
+		N: 8,
+	}
+	got = formatClaudeInjection(withoutWide)
+	if !strings.Contains(got, "P25–P75 band") {
+		t.Errorf("expected P25–P75 fallback label when wide quantiles unavailable, got:\n%s", got)
+	}
+}
+
 // TestFormatClaudeInjectionCitationFormSpec: the injection must
 // instruct Claude to cite in the literal form `~Xm wall (P25–P75: a–b,
 // source n=N)`. If the format string drifts, downstream parsing of

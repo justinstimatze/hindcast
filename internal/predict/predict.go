@@ -13,7 +13,10 @@ package predict
 
 import (
 	"math"
+	"os"
 	"sort"
+	"strconv"
+	"time"
 
 	"github.com/justinstimatze/hindcast/internal/bm25"
 	"github.com/justinstimatze/hindcast/internal/store"
@@ -32,8 +35,7 @@ const (
 	SourceNone      Source = "none"      // no data at all
 )
 
-// Prediction is what gets written to the last-prediction file for the
-// status line to consume. All durations in seconds.
+// Prediction is the local kNN forecast for a turn. All durations in seconds.
 type Prediction struct {
 	WallSeconds    int     `json:"wall_seconds"`
 	ActiveSeconds  int     `json:"active_seconds"`
@@ -41,6 +43,17 @@ type Prediction struct {
 	WallP75        int     `json:"wall_p75"`
 	ActiveP25      int     `json:"active_p25"`
 	ActiveP75      int     `json:"active_p75"`
+	// v0.6.3: wider quantiles. Used as the rendered band when the
+	// variance gate trips — a calibrated [P10, P90] captures 80% of
+	// actual durations vs 50% for [P25, P75], which matches "useful
+	// without overfitting": wider but still actionable, and a strict
+	// superset of the existing distribution so there's no model to
+	// overfit. Populated by the kNN tier only; bucket / project tiers
+	// leave them zero.
+	WallP10        int     `json:"wall_p10,omitempty"`
+	WallP90        int     `json:"wall_p90,omitempty"`
+	ActiveP10      int     `json:"active_p10,omitempty"`
+	ActiveP90      int     `json:"active_p90,omitempty"`
 	N              int     `json:"n"`                       // neighbors used
 	MaxSim         float64 `json:"max_sim,omitempty"`       // top neighbor similarity (knn or regressor's bm25 feature)
 	Source         Source  `json:"source"`
@@ -57,6 +70,40 @@ const knnMinSim = 0.15
 
 // Default k. Small corpora dominate — median over 3–7 is typical.
 const defaultK = 7
+
+// freshnessHalfLifeDays is the half-life used to decay older records'
+// weight in the kNN median. Conservative on purpose: a 60-day half-life
+// means a 60-day-old turn carries half the influence of a turn from
+// today, but week-old turns still carry ~92% — enough to track
+// genuine drift without overfitting one weird week.
+//
+// Override via HINDCAST_FRESHNESS_HALFLIFE_DAYS for experimentation;
+// 0 or negative disables freshness weighting entirely (pre-v0.6.3
+// behavior, useful for A/B vs the freshness-on default).
+const freshnessHalfLifeDays = 60.0
+
+// recencyWeight returns a multiplicative weight in (0, 1] based on the
+// document's age. Zero TS (pre-v0.6.3 records) returns 1.0 — neutral
+// — so existing indexes don't degrade until they refresh.
+func recencyWeight(docTS time.Time, now time.Time) float64 {
+	if docTS.IsZero() {
+		return 1.0
+	}
+	halfLife := freshnessHalfLifeDays
+	if v := os.Getenv("HINDCAST_FRESHNESS_HALFLIFE_DAYS"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			halfLife = f
+		}
+	}
+	if halfLife <= 0 {
+		return 1.0
+	}
+	ageDays := now.Sub(docTS).Hours() / 24.0
+	if ageDays <= 0 {
+		return 1.0
+	}
+	return math.Pow(2, -ageDays/halfLife)
+}
 
 // Predict computes a Prediction from the given signals. `queryHashes`
 // is the BM25-tokenized prompt; `idx` may be nil (disables kNN path).
@@ -79,17 +126,28 @@ func Predict(queryHashes []uint64, idx *bm25.Index, records []store.Record, sk *
 		if len(good) >= 3 {
 			walls := make([]weighted, 0, len(good))
 			actives := make([]weighted, 0, len(good))
+			now := time.Now().UTC()
 			for _, m := range good {
-				walls = append(walls, weighted{float64(m.Doc.WallSeconds), m.Sim})
-				actives = append(actives, weighted{float64(m.Doc.ActiveSeconds), m.Sim})
+				// v0.6.3: weight = sim × recency. Recency decays older
+				// records so genuine project drift (a project's recent
+				// turns getting longer) shifts the median toward what's
+				// actually happening. Conservative half-life (60d) keeps
+				// stable projects stable.
+				w := m.Sim * recencyWeight(m.Doc.TS, now)
+				walls = append(walls, weighted{float64(m.Doc.WallSeconds), w})
+				actives = append(actives, weighted{float64(m.Doc.ActiveSeconds), w})
 			}
 			return Prediction{
 				WallSeconds:   int(weightedMedian(walls) + 0.5),
 				ActiveSeconds: int(weightedMedian(actives) + 0.5),
 				WallP25:       int(weightedQuantile(walls, 0.25) + 0.5),
 				WallP75:       int(weightedQuantile(walls, 0.75) + 0.5),
+				WallP10:       int(weightedQuantile(walls, 0.10) + 0.5),
+				WallP90:       int(weightedQuantile(walls, 0.90) + 0.5),
 				ActiveP25:     int(weightedQuantile(actives, 0.25) + 0.5),
 				ActiveP75:     int(weightedQuantile(actives, 0.75) + 0.5),
+				ActiveP10:     int(weightedQuantile(actives, 0.10) + 0.5),
+				ActiveP90:     int(weightedQuantile(actives, 0.90) + 0.5),
 				N:             len(good),
 				MaxSim:        good[0].Sim,
 				Source:        SourceKNN,

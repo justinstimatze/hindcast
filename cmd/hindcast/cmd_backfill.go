@@ -167,6 +167,7 @@ func cmdBackfill(args []string) {
 					SizeBucket:    r.SizeBucket,
 					ToolCount:     toolCount,
 					FilesTouched:  r.FilesTouched,
+					TS:            r.TS,
 				})
 			}
 			sketch.Add(r.WallSeconds, r.ClaudeActiveSeconds)
