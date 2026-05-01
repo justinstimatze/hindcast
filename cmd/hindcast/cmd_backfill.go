@@ -156,6 +156,12 @@ func cmdBackfill(args []string) {
 			if r.WallSeconds <= 0 {
 				continue
 			}
+			// Skip abandoned/sleep-resumed turns (wall huge, active tiny).
+			// Common in historical transcripts; they break the lognormal
+			// assumption the predictor relies on.
+			if store.IsAbandonedTurn(r.WallSeconds, r.ClaudeActiveSeconds) {
+				continue
+			}
 			if err := store.AppendRecord(logPath, r); err != nil {
 				continue
 			}

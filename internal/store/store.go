@@ -931,3 +931,19 @@ func SweepPending(maxAge time.Duration) error {
 	}
 	return nil
 }
+
+// IsAbandonedTurn reports whether (wall, active) seconds look like an
+// abandoned/sleep-resumed session rather than real work. These happen
+// when the user submits a prompt, walks away, and Stop fires hours later
+// — wall is huge but active (sum of inter-tool gaps, each capped at 60s)
+// stays tiny.
+//
+// Rule: wall > 30min AND active < 10% of wall. The floor avoids false
+// positives on short text-only turns; the ratio spares legitimate
+// long-running autonomous loops where tools fire continuously.
+func IsAbandonedTurn(wall, active int) bool {
+	if wall <= 1800 {
+		return false
+	}
+	return active*10 < wall
+}

@@ -72,6 +72,30 @@ Stock's worst outliers run wild — a 9-second task can get an "18000-second" an
 
 Reproduce with `hindcast eval-api -n 30 -seed 42`. Requires `ANTHROPIC_API_KEY`. Costs <$1 in API tokens per run. Compare modes with `-inject legacy` (v0.1 bucket-table) vs `-inject v06` (default; v0.6.x gated band).
 
+## Why log-space
+
+Wall durations across the recorded corpus, binned on a log axis:
+
+```
+    seconds         count
+       2–    4       24  ██████
+       4–    6       51  ██████████████
+       6–   11       75  █████████████████████
+      11–   21      118  ██████████████████████████████████
+      21–   37      134  ██████████████████████████████████████
+      37–   66      165  ████████████████████████████████████████████████
+      66–  118      127  ████████████████████████████████████
+     118–  211      102  █████████████████████████████
+     211–  377       97  ████████████████████████████
+     377–  676       60  █████████████████
+     676– 1210       26  ███████
+    1210– 2165        8  ██
+    2165– 3876        5  █
+    3876– 6938        1
+```
+
+That bell on a log axis is a lognormal — work durations are multiplicative, not additive (KS D=0.031 vs Normal in log-space, well under the 0.043 critical at α=0.05). It's why hindcast computes everything — medians, bias, bands, MALR — in log-space. A 60s vs 600s gap matters more than a 600s vs 1140s gap, even though the raw deltas are identical.
+
 ## The predictor
 
 A BM25-weighted k-nearest-neighbors regressor over your own project's history. Given the current prompt's hashed tokens, it finds the top-k most similar past turns and takes a similarity-weighted median of their wall / active seconds. Tiers, in order:

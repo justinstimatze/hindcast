@@ -354,3 +354,29 @@ func TestRecordContainsNoPromptText(t *testing.T) {
 		t.Errorf("persisted record leaks prompt_first_line: %s", data)
 	}
 }
+
+func TestIsAbandonedTurn(t *testing.T) {
+	cases := []struct {
+		name          string
+		wall, active  int
+		wantAbandoned bool
+	}{
+		{"short turn", 60, 30, false},
+		{"30min boundary all-text", 1800, 0, false},
+		{"31min text-only", 1860, 0, true},
+		{"31min idle-ratio just under 10%", 1801, 100, true},
+		{"31min idle-ratio at 10% boundary", 1801, 181, false},
+		{"1hr autonomous loop", 3600, 1200, false},
+		{"9hr abandoned", 32400, 30, true},
+		{"degenerate zero", 0, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsAbandonedTurn(tc.wall, tc.active)
+			if got != tc.wantAbandoned {
+				t.Errorf("IsAbandonedTurn(%d, %d) = %v, want %v",
+					tc.wall, tc.active, got, tc.wantAbandoned)
+			}
+		})
+	}
+}

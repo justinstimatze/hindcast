@@ -239,6 +239,12 @@ func doRecord(in recordInput) {
 		ClaudeEstimateActive: estActive,
 	}
 
+	if store.IsAbandonedTurn(r.WallSeconds, r.ClaudeActiveSeconds) {
+		hook.Logf("record", "skip abandoned: session=%s wall=%ds active=%ds",
+			r.SessionID, r.WallSeconds, r.ClaudeActiveSeconds)
+		return
+	}
+
 	lockPath, err := store.LockPath(pend.ProjectHash)
 	if err != nil {
 		hook.Logf("record", "lock path: %s", err)
@@ -576,6 +582,12 @@ func doRecordFallback(in recordInput) {
 		ToolCalls:           turn.ToolCalls,
 		FilesTouched:        turn.FilesTouched,
 		Arm:                 arm,
+	}
+
+	if store.IsAbandonedTurn(r.WallSeconds, r.ClaudeActiveSeconds) {
+		hook.Logf("record", "fallback skip abandoned: session=%s wall=%ds active=%ds",
+			r.SessionID, r.WallSeconds, r.ClaudeActiveSeconds)
+		return
 	}
 
 	lockPath, err := store.LockPath(hash)
