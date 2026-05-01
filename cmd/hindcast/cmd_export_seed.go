@@ -44,6 +44,6 @@ func cmdExportSeed(args []string) {
 		fmt.Fprintf(os.Stderr, "hindcast export-seed: %s\n", err)
 		os.Exit(1)
 	}
-	os.Stdout.Write(data)
+	_, _ = os.Stdout.Write(data)
 	fmt.Println()
 }

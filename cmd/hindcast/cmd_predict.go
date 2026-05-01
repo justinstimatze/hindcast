@@ -59,49 +59,8 @@ func cmdPredict(args []string) {
 	fmt.Println(formatPrediction(p))
 }
 
-// cmdStatusline reads the active session's latest prediction and prints
-// one line suitable for the Claude Code status line. Silently exits if
-// no prediction exists — empty output is the correct status line when
-// hindcast has nothing to say.
-func cmdStatusline(args []string) {
-	fs := flag.NewFlagSet("statusline", flag.ExitOnError)
-	session := fs.String("session", "", "session id (default: current-session pointer)")
-	_ = fs.Parse(args)
-
-	sessionID := *session
-	if sessionID == "" {
-		ptr, err := store.CurrentSessionPointerPath()
-		if err != nil {
-			return
-		}
-		data, err := os.ReadFile(ptr)
-		if err != nil {
-			return
-		}
-		sessionID = strings.TrimSpace(string(data))
-	}
-	if sessionID == "" {
-		return
-	}
-
-	path, err := store.LastPredictionPath(sessionID)
-	if err != nil {
-		return
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var p predict.Prediction
-	if err := json.Unmarshal(data, &p); err != nil {
-		return
-	}
-	fmt.Println(formatPrediction(p))
-}
-
 // formatPrediction produces a compact single-line rendering of a
-// Prediction suitable for a status bar. No color codes — Claude Code
-// handles its own styling.
+// Prediction. Used by `hindcast predict` for the human-facing CLI.
 func formatPrediction(p predict.Prediction) string {
 	if p.Source == predict.SourceNone {
 		switch {
@@ -137,7 +96,7 @@ func formatPrediction(p predict.Prediction) string {
 }
 
 // humanDuration renders seconds as a compact minutes/seconds string.
-// Keeps the status line short: "45s", "3m", "1h12m".
+// Compact rendering for inject + CLI: "45s", "3m", "1h12m".
 func humanDuration(s int) string {
 	if s <= 0 {
 		return "0s"

@@ -18,6 +18,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Turn is one recorded UserPromptSubmit → Stop span. Claude's
@@ -343,9 +344,15 @@ func readRecentTextsBudget(path string, budget int) string {
 		if len(t) >= remaining {
 			// Tail-cap: take the final `remaining` chars of this entry
 			// so we capture the most recent content within the budget.
-			t = t[len(t)-remaining:]
+			// Align to a UTF-8 rune boundary so we don't produce
+			// fragments like \x94 at the start (continuation bytes
+			// from a sliced multi-byte character).
+			cut := len(t) - remaining
+			for cut < len(t) && !utf8.RuneStart(t[cut]) {
+				cut++
+			}
+			t = t[cut:]
 			selected = append([]string{t}, selected...)
-			remaining = 0
 			break
 		}
 		selected = append([]string{t}, selected...)

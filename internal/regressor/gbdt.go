@@ -24,7 +24,11 @@ type Node struct {
 	Right      int
 }
 
-// Predict walks the tree for one feature row.
+// Predict walks the tree for one feature row. Returns 0 if the tree is
+// empty or if a node's FeatureIdx exceeds the runtime feature vector
+// length (defensive against a stale on-disk model from a prior feature
+// count). Without the bounds check, a single dimension-mismatched tree
+// panics out the entire regressor tier in production.
 func (t *Tree) Predict(feats []float64) float64 {
 	if len(t.Nodes) == 0 {
 		return 0
@@ -34,6 +38,9 @@ func (t *Tree) Predict(feats []float64) float64 {
 		n := t.Nodes[idx]
 		if n.Leaf {
 			return n.LeafValue
+		}
+		if n.FeatureIdx < 0 || n.FeatureIdx >= len(feats) {
+			return 0
 		}
 		if feats[n.FeatureIdx] <= n.Threshold {
 			idx = n.Left

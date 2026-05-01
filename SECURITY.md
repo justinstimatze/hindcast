@@ -16,11 +16,17 @@ hindcast runs entirely on your local machine. It never sends data over the netwo
 |---|---|---|
 | per-project JSONL | `~/.claude/hindcast/projects/<hash>.jsonl` | numeric stats, deterministic labels, salt-hashed prompt tokens |
 | per-project BM25 | `~/.claude/hindcast/projects/<hash>.bm25.gob` | salt-hashed inverted index, same numeric metadata |
+| per-project accuracy log | `~/.claude/hindcast/projects/<hash>/accuracy.jsonl` | predicted vs actual durations + band fields per turn; numeric only |
 | global sketch | `~/.claude/hindcast/global-sketch.json` | rolling window of wall/active seconds, no project identity |
+| predictor health | `~/.claude/hindcast/health.json` | tuned sim threshold, MALR-by-tier, regressor winner; numeric only |
+| regressor models | `~/.claude/hindcast/regressor.{gbdt,linear}.gob` | gob-encoded numeric weights + deterministic feature-name list; never user data |
 | salt | `~/.claude/hindcast/salt` | 32 random bytes, 0600 |
 | debug log | `~/.claude/hindcast/hook.log` | timestamps, hook names, session IDs, panics |
-| pending turns | `/tmp/hindcast/pending-<session>.json` | salt-hashed tokens, `cwd`, short-lived (deleted at Stop) |
-| lock files | `/tmp/hindcast/lock-*` | PID of lock holder |
+| per-session fallback marker | `~/.claude/hindcast/sessions/<id>/fallback-marker` | RFC3339 timestamp string only |
+| pending turns | `/tmp/hindcast/pending-<session>-<nanos>.json` | salt-hashed tokens, `cwd`, short-lived (deleted at Stop) |
+| MCP estimate handoff | `/tmp/hindcast/estimate-<session>.json` | wall/active integers from `hindcast_estimate` tool; consumed at next Stop |
+| session momentum | `/tmp/hindcast/session-<session>.json` | recent-turn duration integers, ≤5 entries; deleted at 24h TTL |
+| lock files | `/tmp/hindcast/lock-*` | PID:starttime of lock holder |
 
 All directories are 0700, all files 0600.
 
@@ -67,6 +73,7 @@ The eval-api sampler respects `ANTHROPIC_API_KEY` only; it has no project-allowl
 - **FNV-1a rather than HMAC-SHA256.** FNV is much faster; HMAC would survive salt leaks better. Upgrade deferred pending evidence the tradeoff matters.
 - **No confidentiality protection for `hook.log`.** Writes in plain text. 0600 perms only. Log rotates at 10 MB to `hook.log.1` (1-generation retention).
 - **BM25 stopwords are English-only.** Non-English prompts index more common tokens, degrading retrieval specificity. Not a security issue; adjacent limitation.
+- **macOS lock liveness is PID-only.** Linux uses `/proc/PID/stat` field 22 (process start-time in clock ticks since boot) to disambiguate a PID-recycled-since-lock-write case from a still-live holder. macOS exposes start-time via `KERN_PROC_PID` sysctl, but the current implementation doesn't read it — `processStartTime` returns 0 on darwin and `isStaleLock` falls back to `kill -0` (signal-0 reachability). PID recycling on a long-running macOS box could in theory let a fresh process steal a live lock; in practice this is bounded by macOS's 32-bit PID space (4B forks before any specific PID recycles) and the impact is one record drop, not a security failure.
 
 ### Schema migration
 

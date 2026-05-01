@@ -1,6 +1,530 @@
 # Changelog
 
-## [0.5.0] — unreleased — per-user adaptive tier selection + feature-leak fix
+## Unreleased
+
+(none)
+
+## [0.6.7] — 2026-05-01 — round-3 audit cleanup
+
+Closes the round-3 pre-public audit findings.
+
+### Real bugs
+
+- **`+Inf` tuned threshold did not actually suppress kNN.** v0.6.6
+  passed the per-user `health.TunedSimThreshold` through, but
+  `predict.Predict` skipped the override when the value was `+Inf`
+  (the "never inject" verdict from `hindcast tune`), so kNN
+  continued to fire at the default 0.15 floor for users whose
+  cliff measurement said it shouldn't. v0.6.7 routes `+Inf` to a
+  `+Inf` floor so no neighbor passes — the prediction falls
+  through to bucket / project / global tiers as the user's tune
+  calibration intended.
+- **`health.Save()` raced on a fixed `.tmp` filename.** Two
+  overlapping `_autotune-worker` subprocesses (v0.6.6 architecture
+  allows this — there's no autotune lock) could both write the
+  same `path + ".tmp"`; one's rename ENOENT-failed because the
+  other's rename already moved the file. Fixed by switching to
+  `os.CreateTemp(dir, ".health-*.json")` — same pattern the
+  sketch / regressor / BM25 saves use.
+- **Cold-start tight loop.** When `health.json` was missing
+  (fresh install), `shouldRetune()` returned true on every Stop;
+  `cmdAutoTuneWorker` exited silently on empty data without
+  saving anything, modtime stayed missing, next Stop spawned
+  another worker. Fixed by saving an empty `Health{Verdict: "no
+  records yet"}` on the cold-start branch so the staleness check
+  has a modtime to compare against.
+- **`recordParent` swallowed `cmd.Start()` failure silently.**
+  If exec.Start failed (binary moved, ENOENT during atomic
+  upgrade replace), the temp file was removed and the function
+  returned with no log line. Added `hook.Logf("record", "spawn
+  worker: %s", err)` for diagnostic visibility.
+
+### CI
+
+- **`golangci-lint-action@v6` with `version: v1.61` was
+  incompatible with `.golangci.yml`'s `version: "2"` schema.**
+  CI lint job would have failed on the next run. Bumped action
+  to `@v8` with `version: latest` to match the maintainer's
+  other Go repos.
+
+### Documentation accuracy
+
+- **README.md known-limitations claimed v0.6.5 hadn't wired the
+  tuned threshold** — but v0.6.6 had. Rewritten to describe the
+  current state: tuned threshold is the per-user kNN admission
+  floor when health is set; `knnMinSim = 0.15` is the default
+  floor when it isn't; "never inject" verdict suppresses kNN.
+- **`cmd_pending.go formatClaudeInjection` comment** carried the
+  same v0.6.5-era stale claim. Rewritten.
+- **`cmd_mcp.go` package doc said "Exposes one tool"** but the
+  server has shipped both `hindcast_prior` and `hindcast_estimate`
+  for several versions. Updated to list both.
+- **README `show --accuracy` example output drift.** Real format
+  uses `band hit rate (actual ∈ rendered band):` plus per-row
+  `[P25, P75]` / `[P10, P90]` labels and target-rate parentheticals.
+  README's example was the v0.6.1-era format. Updated.
+- **`WHAT_DIDNT_WORK.md` dates.** v0.5 range said
+  "2026-04-23 – 2026-04-29"; git log shows v0.5 commits on
+  2026-04-26. v0.6.5 sync auto-tune attempt dated 2026-04-30;
+  actually landed 2026-05-01. Both corrected.
+
+### Polish
+
+- **Demo's mid-block "Fogg checking his pocket watch" interjection
+  removed.** The bookend epigraph + closing tap-tap-tap remain;
+  the mid-Demo break-the-fourth-wall sentence was the most
+  likely line to make a stranger bounce.
+- **`--help` was missing `eval-api` and `export-seed`.** Added.
+- **`HINDCAST_SKIP` env var doc** clarified to mention it skips
+  injection too, not only recording.
+- **`CONTRIBUTING.md` ground rule** softened from "no network
+  calls, ever" (which contradicted eval-api) to "no network in
+  hooks or predictor paths" with eval-api carved out.
+- **README badges added** — CI, Go Report Card, MIT license.
+  Matches the maintainer's other public Go repos.
+
+## [0.6.6] — 2026-05-01 — subprocess auto-tune + tuned threshold wired + OSS infra
+
+### Headline
+
+Closes the deferred items from the v0.6.5 pre-public audit. Three real
+changes plus the open-source infrastructure your other repos use.
+
+### Auto-tune detached to subprocess
+
+The hourly tune+regressor refresh is now a `_autotune-worker`
+subprocess spawned detached from the Stop hook (same
+`recordParent → recordWorker` pattern the Stop hook itself uses).
+Replaces the v0.6.5 inline-synchronous attempt, which still let
+process exit kill mid-rename of the regressor models. The subprocess
+outlives the Stop hook's lifetime; gob writes finish independently.
+
+The intermediate v0.6.5 sync attempt is documented in
+`WHAT_DIDNT_WORK.md` along with the original v0.6.4-and-prior
+goroutine pattern.
+
+### Tuned sim threshold wired into predict.Predict
+
+`predict.Predict` now takes a `minSim` parameter. The live caller
+(`cmd_pending.computePrediction`) reads `health.TunedSimThreshold`
+from `health.json` and passes it through. Measurement callers
+(verify, health.Compute) pass 0 to use the stable hardcoded
+`knnMinSim = 0.15` so MALR comparisons remain consistent across
+versions.
+
+`hindcast tune` now actually gates kNN injection per user, instead
+of being reporting-only as it was through v0.6.5. Users whose
+empirical sim cliff is above 0.15 get a tighter kNN floor; users
+whose cliff is at or below 0.15 see no change.
+
+### Open-source infrastructure
+
+Following the pattern from the maintainer's other public Go repos
+(slimemold, gemot, plancheck, winze):
+
+- `.goreleaser.yaml` — cross-builds linux+darwin × amd64+arm64,
+  CGO disabled, `-trimpath` and `-s -w` ldflags, tar.gz archives.
+- `.github/workflows/release.yml` — fires on `v*` tag push, runs
+  `goreleaser-action@v6` with `--clean`. Tagged releases now ship
+  pre-built binaries.
+- `.github/workflows/codeql.yml` — Go CodeQL on push/PR plus
+  Monday 06:00 UTC cron + manual dispatch. Adds the security badge.
+- `.github/dependabot.yml` — weekly gomod (currently empty; Go
+  toolchain bumps) + github-actions updates.
+- `WHAT_DIDNT_WORK.md` — distinctive doc capturing experiments
+  that were measured and reverted. Pulls from the v0.1 → v0.6.5
+  history (status-line pivot, single-pending design, v0.4 size
+  feature leak, single-threshold sim cliff, etc.).
+
+## [0.6.5] — 2026-05-01 — first public release
+
+Tagged the v0.6 polish series. Empirical lift over stock Claude across
+three independent n=30 samples on `claude-sonnet-4-6`:
+
+| seed | control MALR | treatment MALR | lift | 95% CI    |
+|------|--------------|----------------|------|-----------|
+|   42 |       16.3×  |          2.5×  | 6.5× | 2.6–17.6  |
+|    7 |       10.6×  |          2.7×  | 4.0× | 1.4– 8.2  |
+| 2026 |       17.3×  |          1.7×  | 9.9× | 6.9–28.0  |
+
+All three CIs above 1.0 — treatment reduces error with statistical
+confidence on every sample. Reproduce with `hindcast eval-api`.
+
+The v0.6 series was a single-day polish run: gated injection brought
+hindcast back into Claude's context after the v0.2 anti-anchoring
+pivot, with new gates so wrong-retrieval doesn't dominate (tier gate,
+variance gate); the recording pipeline got a per-turn pending file to
+fix the rapid-fire turn drop; the accuracy log learned to measure
+band hit rate instead of point MALR; the kNN tier got freshness
+weighting and small-sample shrinkage. See per-version entries below
+for the engineering history.
+
+Pre-release hardening also landed: rune-aware tail trimming in
+`transcript.readRecentTextsBudget`, harder `looksAutomated` that
+catches automation markers anywhere in the rolling-window context
+(not just the user's first line), and the v0.6.x inject mode in
+`cmd_eval_api.go` so the A/B is actually testing what production
+ships.
+
+## [0.6.4] — 2026-04-30 — small-sample shrinkage on empirical quantiles
+
+### Headline
+
+The v0.6.3 production data window showed point-rendered band hit rate
+at 31% (n=29) — well under the 50% target for a calibrated [P25, P75]
+interval. Diagnosis: with only ~7 kNN neighbors, the empirical P25/P75
+is a noisy estimate of the true central-50% interval, and small samples
+systematically produce quantiles that are too compact (biased toward
+the median).
+
+The fix is small-sample shrinkage: widen each empirical quantile away
+from the median by a factor `1 + alpha/sqrt(n)`, with `alpha=0.5`.
+
+```
+n=7   → factor ≈ 1.189   (widen by ~19%)
+n=20  → factor ≈ 1.112   (widen by ~11%)
+n=100 → factor ≈ 1.050   (widen by ~5%)
+n=∞   → factor → 1.0     (no correction needed)
+```
+
+Applied to all four wall quantiles (P10, P25, P75, P90) and all four
+active quantiles. Bucket / project / global tiers are unaffected — they
+have higher minimum-n floors and use a separate code path.
+
+### Why alpha=0.5
+
+Conservative on purpose. The principled small-sample correction for the
+quantile of a normal distribution is closer to alpha=1.0 (factor ≈ 1.38
+at n=7), but production turn-duration distributions are usually heavier-
+tailed than normal, so true bands are even wider. Starting at 0.5 as
+the floor; will tune up if the v0.6.4 production data still underbands.
+
+### What this targets
+
+Point-rendered hit rate (currently 31%) should drift toward 50%; that's
+the regime where the variance gate didn't trip and the inject committed
+to a number with `(P25–P75: a–b)` as the implied confidence interval.
+Variance-gated rate (currently 55%, mid-transition toward 80%) should
+also bump up, but it was already on path.
+
+### Tests
+
+- `TestPredictKNNAppliesShrinkage` — corrected P25 ≤ raw P25, corrected
+  P75 ≥ raw P75 (shrinkage widens, never tightens).
+- `TestPredictKNNShrinkageScalesWithN` — ordered quantiles preserved
+  across sample sizes.
+- Existing `TestPredictKNNComputesWideQuantiles` still passes — relative
+  ordering invariants survive the shrinkage.
+
+## [0.6.3] — 2026-04-30 — wider bands, freshness weighting, dynamic variance gate
+
+### Headline
+
+Three independent moves to handle the project-and-day-by-day calibration
+drift surfaced in v0.6.2's first real data window. v0.6.2 unstuck
+recording; v0.6.3 makes the inject *useful* across drifting projects
+without over-fitting to one weird week.
+
+### A — Wider quantile band when uncertain
+
+The kNN tier now computes `WallP10/WallP90` (and Active counterparts)
+alongside `WallP25/WallP75`. When the variance gate trips, the inject
+renders the wider `[P10, P90]` band as the headline:
+
+```
+wall 30s–8m (high uncertainty, no point estimate; P10–P90 band)
+```
+
+A calibrated P10/P90 band hits 80% of actuals by definition; a
+calibrated P25/P75 band hits 50%. Rendering the wider band when the
+predictor is already uncertain means the surface to Claude is honest
+about the spread without committing to a precise-looking point.
+
+The accuracy log captures both quartile pairs; `hindcast show
+--accuracy` now reports band hit rate against the *rendered* band
+(P10/P90 for variance-gated, P25/P75 for point), with target hit
+rates labeled in the output.
+
+### B — Freshness weighting in kNN
+
+`bm25.Doc.TS` is now populated when a record enters the index (live
+record + happy-path Stop + fallback Stop + backfill). `predict.Predict`
+multiplies each kNN match's BM25 sim by an exponential recency factor
+with a 60-day half-life:
+
+  `weight = sim × 2^(-age_days / halfLife)`
+
+Recent turns weighted ~2x heavier than two-month-old turns; week-old
+turns at ~92%. Conservative on purpose: enough to catch genuine project
+drift without swinging on one anomalous week. Override via
+`HINDCAST_FRESHNESS_HALFLIFE_DAYS` env var; ≤0 disables.
+
+Pre-v0.6.3 records have zero TS and weight 1.0 (neutral) — existing
+indexes don't degrade until they refresh.
+
+### C — Dynamic variance gate threshold
+
+The variance gate threshold (P75/P25 ratio) was a hard 3.0. v0.6.3
+makes it dynamic: kNN matches with small samples (n<5) or low BM25
+similarity (max_sim<0.4) drop the threshold to 2.0. The intuition:
+when the underlying signal is itself uncertain (thin neighbors, weak
+match), the inject should surface the band more readily rather than
+commit to a point estimate the predictor can't really back.
+
+Bucket / project / regressor tiers keep the base 3.0 threshold —
+those tiers don't have a per-prediction confidence signal to act on.
+
+### Why all three together
+
+- **A alone** widens the band on already-uncertain cases — useful when
+  the kNN's neighbor distribution does span reality but P25/P75 cut it
+  off.
+- **B alone** shifts the kNN's median toward recent reality, useful
+  when a project's distribution has drifted (psychosis-ismyaialive
+  case from the v0.6.2 data: kNN was matching against past short
+  turns, missing that recent turns are 3-5× longer).
+- **C alone** trips the variance gate more often on weak-signal
+  predictions, which then renders A's wider band.
+
+A + B + C compose: B fixes the *center* of the distribution under
+drift, A widens *what gets shown* when uncertainty is high, C decides
+*when uncertainty is high*. None of the three tunes a feature
+weight against feedback — there's no model to overfit, just rendering
+choices over the existing weighted-quantile data.
+
+### Tests
+
+- `internal/predict/predict_test.go:TestPredictKNNComputesWideQuantiles`
+  — kNN populates ordered P10<P25≤median≤P75<P90.
+- `TestRecencyWeight` — recencyWeight returns 1.0 for zero TS, exp
+  decay for non-zero, ≥1.0 floor for clock-skew safety.
+- `TestPredictKNNFreshnessShiftsMedianTowardRecent` — mixed-age
+  neighbors: half from 6 months ago short, half today long → median
+  pulled toward recent values.
+- `cmd/hindcast/cmd_pending_test.go:TestFormatClaudeInjectionDynamicVarianceThreshold`
+  — large-n + ratio 2.5 stays point; small-n + same ratio trips
+  (lowered threshold); low-sim same; non-kNN unaffected.
+- `TestFormatClaudeInjectionRendersWidePercentilesWhenAvailable` —
+  variance gate uses P10/P90 when populated, falls back to P25/P75.
+
+### Schema
+
+`accuracy.jsonl` entries optionally include `predicted_wall_p10`,
+`predicted_wall_p90`. `bm25.Doc` has a new `TS` field (gob-encoded;
+older indexes default to zero TS, which means freshness-neutral).
+Forward-compat: pre-v0.6.3 readers ignore the new fields.
+
+## [0.6.2] — 2026-04-30 — pending-per-turn (fix rapid-fire turn drops)
+
+### Headline
+
+Pending file is now keyed on `(session, start_ts_nanos)` instead of
+session alone. The single-pending-per-session design (`pending-<id>.json`)
+was being overwritten when a follow-up prompt arrived within milliseconds
+of the prior assistant finishing — by the time Stop fired for turn N, the
+pending had already been clobbered by turn N+1's UserPromptSubmit, so
+Stop's `since`-cutoff was set to a moment after the just-completed turn
+and silently logged "no turns since" instead of recording.
+
+This is exactly the failure mode that surfaced during rapid-fire
+multi-session use the night of v0.6.1: 30+ "no turns since" entries and
+zero "recorded:" entries across an evening of real conversation.
+
+### Fix
+
+- `store.PendingPath(sessionID, startTS)` now embeds the start timestamp
+  in the filename: `pending-<sessionID>-<unixNanos>.json`. Zero startTS
+  returns the legacy single-file shape so old in-flight pendings are
+  still readable post-upgrade.
+- `store.ListPendingForSession(sessionID)` globs both legacy and new
+  filename shapes, parses each, returns `[]PendingFile` sorted oldest-
+  first by `StartTS`. Corrupt files are skipped silently and cleaned by
+  the TTL sweeper.
+- `cmd_record.go doRecord` no longer reads a single pending. It finds
+  the latest completed turn in the transcript, then matches that turn
+  to the pending whose StartTS is closest to (and within ±10s of) the
+  turn's PromptTS. Unmatched pendings stay in place — they correspond
+  to canceled/interrupted prompts and get swept by the existing 6h TTL.
+- When no pending matches the latest turn (e.g., upgrade-time orphaned
+  state, missing UserPromptSubmit), doRecord falls through to the same
+  transcript-only fallback path used for shadowed-hook projects. That
+  path records without writing an accuracy.jsonl entry, since there's
+  no prediction to compare against.
+
+### Compat
+
+Sessions started under a pre-v0.6.2 binary continue to write to the old
+single-file pending path until they exit. Post-v0.6.2 Stop reads both
+patterns, so no in-flight data is lost across upgrade.
+
+### Tests
+
+- `internal/store/store_test.go:TestPendingPathTimestamped` —
+  PendingPath returns distinct paths for distinct startTS values; zero
+  startTS returns the legacy shape.
+- `TestListPendingForSessionSorts` — multi-pending session returns
+  oldest-first.
+- `TestListPendingForSessionPicksUpLegacy` — glob captures both pre-
+  v0.6.2 and v0.6.2 pending file shapes.
+
+## [0.6.1] — 2026-04-30 — accuracy log captures band; band-hit-rate metric
+
+### Headline
+
+`accuracy.jsonl` now records the predicted P25/P75 band, max BM25 sim, and
+a `variance_gated` flag alongside the point estimate. `hindcast show
+--accuracy` reports band hit rate (actual ∈ [P25, P75]) split by inject
+mode (point-rendered vs variance-gated). This is the metric that targets
+what Claude actually saw — point MALR penalizes regression-to-the-mean on
+tail outliers, but the inject suppresses the point behind the variance
+gate when the band is wide.
+
+### Why this matters
+
+Live point-MALR was 4.45× in the v0.6.0 ship snapshot, while `hindcast
+verify` (prefix-LOO synthetic over backfilled records) reported 1.61×.
+Decomposing by actual-duration bucket showed the gap is structural: kNN
+regresses tail outliers (very-short or very-long real turns) toward the
+central tendency, so a 10-second real turn matched to neighbors with
+median 2 minutes scores as a 12× miss even though the prediction was
+honest about the central tendency.
+
+The variance gate suppresses point estimates in those cases (the inject
+emits the band as the headline instead). But accuracy.jsonl was only
+logging the point — measuring something the inject doesn't actually
+surface to Claude. v0.6.1 captures the band and computes a hit-rate
+metric that matches what Claude saw.
+
+### Schema
+
+`accuracy.jsonl` entries now optionally include:
+
+```json
+{
+  "predicted_wall_p25": 30,
+  "predicted_wall_p75": 90,
+  "predicted_max_sim": 0.71,
+  "variance_gated": true,
+  ...
+}
+```
+
+All four are `omitempty`, so older readers stay tolerant. Pre-v0.6.1
+entries are excluded from band-hit-rate computation; the report shows
+"not yet computable" until new entries accumulate.
+
+### Tier-aware variance flag
+
+`variance_gated` now means *the inject was rendered AND showed the band
+as headline* — not just *the predictor produced a wide band*. Tiers the
+inject doesn't surface (global / none) always log
+`variance_gated=false` regardless of band width, because Claude never
+saw them. Without this, a global-tier wide-band entry would be counted
+toward "variance-gated band hit rate," measuring something other than
+what was actually rendered. Caught immediately after v0.6.1's first
+production entry surfaced a global-source row with `variance_gated=true`.
+
+### Tests
+
+- `internal/store/store_test.go:TestPendingBandFieldsRoundtrip` —
+  PendingTurn round-trips the new fields through Write/Read.
+- `cmd/hindcast/cmd_admin_test.go:TestWithBandRows` — filter excludes
+  pre-v0.6.1 entries AND non-injecting tiers (global / none).
+- `cmd/hindcast/cmd_admin_test.go:TestBandHitRateComputation` — boundary
+  cases (inclusive bracket), point-vs-variance-gated split, all from
+  inject-eligible source tiers.
+
+## [0.6.0] — 2026-04-30 — gated context injection + Stop-hook fallback + status line removed
+
+### Headline
+
+The status line is gone. `hindcast pending` now emits a calibrated prior
+into Claude's UserPromptSubmit additionalContext channel — the v0.1
+inject-into-Claude path, but with anchoring guards that didn't exist
+before. Claude reads the predicted band and is told to cite it in a
+specific form on any wall-clock estimate.
+
+### Anchoring guards
+
+Two gates trip when retrieval is likely wrong:
+
+- **Tier gate.** Injection fires only for `regressor / kNN / bucket /
+  project` sources. The cross-project `global` sketch and `none` tier
+  are silent — global p50 is biased short on new projects (sketch is
+  dominated by maintainer/test sessions), and an anchor would flip the
+  failure mode from "wildly over" to "wildly under" with the same
+  magnitude error and the opposite sign.
+- **Variance gate.** When `WallP75 / WallP25 > 3.0`, the injection
+  emits the band as the headline ("wall 1m–8m, high uncertainty") in
+  place of a point estimate. A wide interval is honest where a precise-
+  looking number would falsely anchor.
+
+The injection text additionally instructs Claude to cite predictions in
+`~Xm wall (P25–P75: a–b, source n=N)` form, override only on structural
+scope mismatch (and not on perceived complexity), and **not pad the
+override out of caution** — the over-estimation bias hindcast is meant
+to fix.
+
+`HINDCAST_INJECT=0` disables; `HINDCAST_LEGACY_INJECT=1` re-enables the
+v0.1 ungated full-bucket-table injection for A/B research.
+
+### Stop-hook fallback for shadowed UserPromptSubmit
+
+When a project's local `.claude/settings.json` defines its own
+UserPromptSubmit hooks, Claude Code merges by **replacement**, not
+union — a project-local UserPromptSubmit list shadows the global
+`hindcast pending` hook entirely. Prior to v0.6, this resulted in
+silent zero-record projects: Stop fired but found no pending file and
+gave up.
+
+v0.6 adds `doRecordFallback` in `cmd_record.go`. When Stop sees no
+pending file, it parses the transcript tail directly, hashes the prompt
+in-memory, and reconstructs the same Record the happy path would have
+produced. A per-session `fallback-marker` file tracks the last
+recorded `PromptTS` so re-fires don't double-count.
+
+No accuracy log entry is written from the fallback path — there is no
+prediction to compare against because `pending` never ran.
+
+### Status line removed
+
+`hindcast statusline` (subcommand) and `cmdStatusline` (binary) are
+deleted along with the supporting `writeLastPrediction` and
+`CurrentSessionPointerPath` paths. The store path builder
+`LastPredictionPath` was renamed `SessionDirPath` (it was always a
+directory; the old name was a vestige of the deleted prediction file).
+
+`hindcast install` migrates pre-v0.6 settings.json by removing any
+`statusLine` entry that points at `hindcast statusline`. User-customized
+statusLine commands are preserved. `hindcast uninstall` mirrors the
+cleanup so cruft from any version is removed on uninstall.
+
+### Privacy invariant preserved
+
+`formatClaudeInjection` reads only numeric `Prediction` fields. The
+fallback hashes prompts before any disk write. Two new regression tests
+enforce this:
+
+- `cmd/hindcast/cmd_pending_test.go` — table-driven tier gate, variance
+  gate, active-zero suppression, don't-pad guidance presence,
+  per-source label rendering.
+- `cmd/hindcast/cmd_record_test.go` — fallback writes no plaintext
+  (sentinel-string sweep over `~/.claude/hindcast/`), and
+  `fallback-marker` advances correctly to suppress duplicate recording.
+- `cmd/hindcast/cmd_install_test.go` — legacy statusLine migration is
+  applied to ours and not to user-customized entries.
+
+The existing `internal/store/store_test.go:TestRecordContainsNoPromptText`
+continues to pass.
+
+### Migration
+
+Existing users upgrading from v0.5 should run `hindcast install` (not
+just `go install`). The first install merges the legacy statusLine
+cleanup into settings.json. Without it, Claude Code's status bar
+displays "unknown command: statusline" on every prompt.
+
+## [0.5.0] — 2026-04-26 — per-user adaptive tier selection + feature-leak fix
 
 ### Headline
 
@@ -87,7 +611,7 @@ distribution is heterogeneous and the model was free-riding on it.
 
 ---
 
-## [0.4.0] — unreleased — universal-features regressor (offline tooling)
+## [0.4.0] — 2026-04-26 — universal-features regressor (offline tooling)
 
 ### The investigation
 
@@ -157,7 +681,7 @@ displacing kNN as the primary predictor on user data is not there.
   `predict.Predict` consult health.json to pick the locally-winning tier.
   Makes the regressor opt-in by data, not by config.
 
-## [0.3.1] — unreleased — auto-tuned per-user sim threshold
+## [0.3.1] — 2026-04-25 — auto-tuned per-user sim threshold
 
 Cross-corpus benchmark in v0.3.0 showed the global `sim ≥ 0.5` cliff
 doesn't generalize. v0.3.1 ships per-user tuning: each install computes
@@ -188,7 +712,7 @@ automatically from the Stop hook when stale.
   conditions). Future iteration may add an opt-in toggle once the tuned
   values prove stable across users in the wild.
 
-## [0.3.0] — unreleased — cross-corpus benchmark + honest reframe
+## [0.3.0] — 2026-04-25 — cross-corpus benchmark + honest reframe
 
 ### The investigation
 
@@ -250,7 +774,7 @@ OpenHands SWE-bench Lite (~1.2k Claude trajectories with real prompts).
 - `cmd/diag/` — was a one-off diagnostic for tuning the local sim threshold.
   Superseded by `bench-cross`.
 
-## [0.2.0] — unreleased — pivot from context-injection to human-facing predictor
+## [0.2.0] — 2026-04-23 — pivot from context-injection to human-facing predictor
 
 ### The pivot
 An adversarial review + literature survey during development flagged two

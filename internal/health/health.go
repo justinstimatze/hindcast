@@ -39,7 +39,7 @@ type prefRow struct {
 // read it without recomputation.
 type Health struct {
 	// Tuning result.
-	TunedSimThreshold float64 `json:"tuned_sim_threshold"` // gate sim ≥ this; ∞ = never inject
+	TunedSimThreshold  float64 `json:"tuned_sim_threshold"` // gate sim ≥ this; ∞ = never inject
 	KNNMALRAtThreshold float64 `json:"knn_malr_at_threshold"`
 	BucketMALR         float64 `json:"bucket_malr"`
 	GroupMALR          float64 `json:"group_malr"` // overall project tier
@@ -49,7 +49,7 @@ type Health struct {
 	NBucket            int     `json:"n_bucket"`
 	LastTunedAt        string  `json:"last_tuned_at"` // RFC3339 UTC
 
-	// Verdict — single-line summary the status line and `show --health` use.
+	// Verdict — single-line summary surfaced by `show --health`.
 	Verdict string `json:"verdict"`
 
 	// Per-sim-bucket detail for debugging.
@@ -72,9 +72,9 @@ type Health struct {
 }
 
 type SimBucketStat struct {
-	LoSim   float64 `json:"lo_sim"`
-	HiSim   float64 `json:"hi_sim"`
-	N       int     `json:"n"`
+	LoSim    float64 `json:"lo_sim"`
+	HiSim    float64 `json:"hi_sim"`
+	N        int     `json:"n"`
 	WallMALR float64 `json:"wall_malr"`
 }
 
@@ -100,11 +100,38 @@ func (h *Health) Save() error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0600); err != nil {
+	// Use os.CreateTemp's random-suffix temp filename so concurrent
+	// _autotune-worker subprocesses don't race on a shared `.tmp`
+	// path — without this, two overlapping retunes can have one's
+	// rename ENOENT-fail because the other's rename already moved
+	// the temp into place. CreateTemp gives each writer a unique
+	// name; first to rename wins, second silently retries (Rename
+	// is atomic on Linux/macOS).
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".health-*.json")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() {
+		tmp.Close()
+		os.Remove(tmpName)
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		cleanup()
+		return err
+	}
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // Load reads the persisted health, returning nil + error if absent.
@@ -135,7 +162,7 @@ func Load() (*Health, error) {
 //  3. For the kNN tier, scan candidate thresholds [0.15, 0.20, ..., 0.95].
 //     For each, compute "kNN MALR among predictions where max_sim ≥ t".
 //     The tuned threshold is the smallest t where:
-//        knn_malr_at_t ≤ 0.85 × bucket_malr
+//     knn_malr_at_t ≤ 0.85 × bucket_malr
 //     i.e. kNN beats bucket fallback by at least 15% at this gate.
 //     If no such t exists, tuned threshold = +Inf (gate never opens).
 //
@@ -153,7 +180,7 @@ func Compute(byProject map[string][]store.Record, sk *store.Sketch, warmup int) 
 		idx := bm25.New()
 		for i, r := range recs {
 			if i >= warmup && r.WallSeconds > 0 && len(r.PromptTokens) > 0 {
-				p := predict.Predict(r.PromptTokens, idx, recs[:i], sk, r.TaskType)
+				p := predict.Predict(r.PromptTokens, idx, recs[:i], sk, r.TaskType, 0)
 				if p.Source != predict.SourceNone {
 					rows = append(rows, prefRow{
 						source: p.Source, sim: p.MaxSim,
@@ -310,7 +337,7 @@ func evalAdaptive(h *Health, byProject map[string][]store.Record, sk *store.Sket
 			if r.WallSeconds <= 0 {
 				continue
 			}
-			lp := predict.Predict(r.PromptTokens, idx, hist, sk, r.TaskType)
+			lp := predict.Predict(r.PromptTokens, idx, hist, sk, r.TaskType, 0)
 			if lp.Source == predict.SourceNone || lp.WallSeconds <= 0 {
 				hist = append(hist, r)
 				regressor.AddRecordToIndex(idx, r)

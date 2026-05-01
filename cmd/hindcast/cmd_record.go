@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/justinstimatze/hindcast/internal/bm25"
@@ -15,6 +18,7 @@ import (
 	"github.com/justinstimatze/hindcast/internal/regressor"
 	"github.com/justinstimatze/hindcast/internal/sizes"
 	"github.com/justinstimatze/hindcast/internal/store"
+	"github.com/justinstimatze/hindcast/internal/tags"
 	"github.com/justinstimatze/hindcast/internal/transcript"
 )
 
@@ -79,6 +83,7 @@ func recordParent() {
 	cmd.Stderr = nil
 	cmd.SysProcAttr = detachAttrs()
 	if err := cmd.Start(); err != nil {
+		hook.Logf("record", "spawn worker: %s", err)
 		os.Remove(tmpPath)
 		return
 	}
@@ -121,30 +126,76 @@ func doRecord(in recordInput) {
 	if in.SessionID == "" {
 		return
 	}
-	pendingPath, err := store.PendingPath(in.SessionID)
-	if err != nil {
-		hook.Logf("record", "pending path: %s", err)
-		return
-	}
-	pend, err := store.ReadPending(pendingPath)
-	if err != nil {
-		hook.Logf("record", "read pending: %s", err)
-		return
-	}
-	defer os.Remove(pendingPath)
 
 	_ = store.SweepPending(6 * time.Hour)
+	_ = store.SweepSessionMomentum(24 * time.Hour)
 
-	turns, err := transcript.ParseTail(in.TranscriptPath, 2*1024*1024, pend.StartTS)
+	// v0.6.2: Stop fires once per completed turn. Find the latest
+	// completed turn in the transcript, then match it to the pending
+	// whose StartTS is closest to the turn's prompt timestamp. This
+	// replaces the single-pending-per-session design where rapid-fire
+	// follow-up prompts overwrote the previous turn's pending before
+	// Stop could read it, silently dropping completed turns.
+	turns, err := transcript.ParseTail(in.TranscriptPath, 2*1024*1024, time.Now().Add(-6*time.Hour))
 	if err != nil {
 		hook.Logf("record", "parse transcript: %s", err)
 		return
 	}
-	if len(turns) == 0 {
-		hook.Logf("record", "no turns since %s", pend.StartTS.Format(time.RFC3339))
+	// Find the most recent completed turn (has both prompt and assistant).
+	var turn transcript.Turn
+	found := false
+	for i := len(turns) - 1; i >= 0; i-- {
+		if turns[i].WallSeconds() > 0 {
+			turn = turns[i]
+			found = true
+			break
+		}
+	}
+	if !found {
+		// No completed turn — nothing to record. (Common: interrupted
+		// prompts, escape-canceled responses, multi-stop turns.)
 		return
 	}
-	turn := turns[0]
+
+	// Match this turn to one of the session's outstanding pendings.
+	// Pick the pending whose StartTS is closest to (and not after) the
+	// turn's PromptTS, within a generous tolerance for clock skew
+	// between the hook's time.Now() and CC's transcript timestamp.
+	pendings, _ := store.ListPendingForSession(in.SessionID)
+	var matched *store.PendingFile
+	const matchToleranceSec = 10
+	for i := range pendings {
+		delta := turn.PromptTS.Sub(pendings[i].StartTS).Seconds()
+		// pending's StartTS should be at-or-before the turn's PromptTS
+		// (the pending is written by UserPromptSubmit just before CC
+		// stamps the user message). Allow a small negative slop for
+		// clock skew. Reject pendings that are far in the future.
+		if delta < -matchToleranceSec || delta > 6*60*60 {
+			continue
+		}
+		if matched == nil || math.Abs(delta) < math.Abs(turn.PromptTS.Sub(matched.StartTS).Seconds()) {
+			matched = &pendings[i]
+		}
+	}
+
+	if matched == nil {
+		// No pending matches this turn — fall through to the same
+		// transcript-only fallback used when a project shadows the
+		// global hook. The fallback also sweeps stale pendings via
+		// the marker mechanism.
+		doRecordFallback(in)
+		return
+	}
+
+	pend, err := store.ReadPending(matched.Path)
+	if err != nil {
+		hook.Logf("record", "read pending: %s", err)
+		return
+	}
+	// Consume the matched pending. Any older unmatched pendings stay
+	// in place — they correspond to canceled/interrupted prompts and
+	// will get cleaned up by the SweepPending TTL (6h).
+	defer os.Remove(matched.Path)
 
 	// Claude's self-reported estimate (if any) — written by the
 	// hindcast_estimate MCP tool to a per-session file. Read and unlink.
@@ -198,7 +249,7 @@ func doRecord(in recordInput) {
 		hook.Logf("record", "acquire lock: %s", err)
 		return
 	}
-	defer lock.Release()
+	defer func() { _ = lock.Release() }()
 
 	logPath, err := store.ProjectLogPath(pend.ProjectHash)
 	if err != nil {
@@ -211,14 +262,20 @@ func doRecord(in recordInput) {
 	}
 
 	// After appending, check whether the log rotated and if so, rebuild
-	// the BM25 index from the records still in the active log so index
-	// and log stay in sync.
-	if err := rotateBM25IfNeeded(logPath, pend.ProjectHash); err != nil {
+	// the BM25 index from the records still in the active log (which
+	// includes the just-appended record) so index and log stay in sync.
+	// When rotation rebuilt, the just-appended record is already in the
+	// index — skip the subsequent updateBM25 call to avoid double-
+	// counting the turn.
+	rotated, err := rotateBM25IfNeeded(logPath, pend.ProjectHash)
+	if err != nil {
 		hook.Logf("record", "bm25 rotate: %s", err)
 	}
 
-	if err := updateBM25(pend.ProjectHash, pend.PromptTokens, r, toolCount); err != nil {
-		hook.Logf("record", "bm25 update: %s", err)
+	if !rotated {
+		if err := updateBM25(pend.ProjectHash, pend.PromptTokens, r, toolCount); err != nil {
+			hook.Logf("record", "bm25 update: %s", err)
+		}
 	}
 	if err := updateSketch(r); err != nil {
 		hook.Logf("record", "sketch update: %s", err)
@@ -241,38 +298,13 @@ func doRecord(in recordInput) {
 		appendAccuracyLine(pend.ProjectHash, pend, r)
 	}
 
-	// Auto-tune: refresh predictor health if stale. Cheap (~500ms),
-	// runs at most once per hour. Replaces "user remembers to run
-	// hindcast tune" with automatic background refresh from the Stop
-	// hook (which is already async and detached). The tuned threshold
-	// can then be read by future UserPromptSubmit hooks for gating.
+	// Auto-tune: refresh predictor health + regressor models if stale.
+	// Spawned as a detached subprocess so it's not constrained by
+	// recordWorker's 30s timeout — long retunes used to risk getting
+	// killed mid-rename, leaving stale .tmp files. The subprocess runs
+	// to completion independently of this Stop's lifetime.
 	if shouldRetune() {
-		go func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					hook.Logf("record", "auto-tune PANIC %v", rec)
-				}
-			}()
-			byProject, err := loadRecordsByProjectSimple()
-			if err != nil {
-				return
-			}
-			sk, _ := store.LoadSketch()
-			h := health.Compute(byProject, sk, 20)
-			// Refresh persisted regressor models on the same cadence so
-			// that when h.RegressorWinner is non-"none" the file the
-			// predict path loads is current. Failures are non-fatal —
-			// predict.computePrediction soft-falls-through to the ladder.
-			if m, err := regressor.Train(byProject, 20); err == nil {
-				_ = m.Save()
-			}
-			if lm, err := regressor.TrainLinearFromRecords(byProject, 20, 1.0); err == nil {
-				_ = lm.Save()
-			}
-			_ = h.Save()
-			hook.Logf("record", "auto-tune: threshold=%.2f knn-malr=%.2f winner=%s lift=%.2fx n=%d",
-				h.TunedSimThreshold, h.KNNMALRAtThreshold, h.RegressorWinner, h.RegressorLiftVsLadder, h.NPredictions)
-		}()
+		spawnAutoTuneWorker()
 	}
 
 	// Update per-session momentum tracker so next UserPromptSubmit in
@@ -303,6 +335,27 @@ func appendAccuracyLine(hash string, pend store.PendingTurn, r store.Record) {
 		"actual_active":    r.ClaudeActiveSeconds,
 		"source":           pend.PredictionSrc,
 	}
+	// v0.6.1: capture band fields so band-hit-rate is computable
+	// post-hoc. Only include when populated, to keep older readers
+	// tolerant of the schema change.
+	if pend.PredictedWallP25 > 0 {
+		row["predicted_wall_p25"] = pend.PredictedWallP25
+	}
+	if pend.PredictedWallP75 > 0 {
+		row["predicted_wall_p75"] = pend.PredictedWallP75
+	}
+	if pend.PredictedWallP10 > 0 {
+		row["predicted_wall_p10"] = pend.PredictedWallP10
+	}
+	if pend.PredictedWallP90 > 0 {
+		row["predicted_wall_p90"] = pend.PredictedWallP90
+	}
+	if pend.PredictedMaxSim > 0 {
+		row["predicted_max_sim"] = pend.PredictedMaxSim
+	}
+	if pend.VarianceGated {
+		row["variance_gated"] = true
+	}
 	data, err := json.Marshal(row)
 	if err != nil {
 		return
@@ -323,9 +376,15 @@ func updateBM25(hash string, promptHashes []uint64, r store.Record, toolCount in
 	if err != nil {
 		return err
 	}
+	// Auto-heal corrupt indexes: if Load returns a decode error (e.g. a
+	// crash mid-write left a partial gob, or the schema bumped past
+	// what's persisted), start fresh. Without this the index never
+	// recovers — every subsequent updateBM25 returns the same decode
+	// error and the kNN tier silently goes dark for that project.
 	idx, err := bm25.Load(path)
 	if err != nil {
-		return err
+		hook.Logf("record", "bm25 load %s failed (%s); starting fresh index", path, err)
+		idx = bm25.New()
 	}
 	idx.Add(promptHashes, bm25.Doc{
 		ActiveSeconds: r.ClaudeActiveSeconds,
@@ -334,6 +393,7 @@ func updateBM25(hash string, promptHashes []uint64, r store.Record, toolCount in
 		SizeBucket:    r.SizeBucket,
 		ToolCount:     toolCount,
 		FilesTouched:  r.FilesTouched,
+		TS:            r.TS,
 	})
 	return idx.Save(path)
 }
@@ -344,12 +404,17 @@ func updateBM25(hash string, promptHashes []uint64, r store.Record, toolCount in
 // new sketch, losing one sample.
 // rotateBM25IfNeeded checks if the active log was just rotated out (file
 // size back to near-zero after AppendRecord) and if so, rebuilds the
-// BM25 index from the (now trimmed) record set. Cheap fast-path when no
-// rotation happened: just returns.
-func rotateBM25IfNeeded(logPath, hash string) error {
+// BM25 index from the (now trimmed) record set, which already includes
+// the just-appended record. Returns (true, nil) when a rebuild
+// happened — the caller should NOT then call updateBM25 with the same
+// record, or the index would double-count it.
+//
+// Returns (false, nil) on the cheap fast-path (no rotation detected,
+// no rebuild needed).
+func rotateBM25IfNeeded(logPath, hash string) (bool, error) {
 	stat, err := os.Stat(logPath)
 	if err != nil {
-		return nil
+		return false, nil
 	}
 	// Rotation happened if the rotated segment (.1) exists AND is
 	// younger than the active log's modification time. Heuristic: if
@@ -357,25 +422,25 @@ func rotateBM25IfNeeded(logPath, hash string) error {
 	rotatedPath := logPath + ".1"
 	rotStat, err := os.Stat(rotatedPath)
 	if err != nil || rotStat.Size() < store.LogRotateSize {
-		return nil
+		return false, nil
 	}
 	if stat.Size() > store.MaxRecordSize*2 {
-		return nil // active log not freshly rotated
+		return false, nil // active log not freshly rotated
 	}
 	// Rebuild BM25 from current active log's records.
 	records, err := store.ReadRecentRecords(logPath, 500)
 	if err != nil {
-		return err
+		return false, err
 	}
 	bm25Path, err := store.ProjectBM25Path(hash)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// Check if rebuild is actually warranted: compare index's doc count
 	// to active log's record count. Only rebuild on significant drift.
 	idx, _ := bm25.Load(bm25Path)
 	if idx != nil && len(idx.Docs) <= len(records)*2 {
-		return nil
+		return false, nil
 	}
 	fresh := bm25.New()
 	for _, r := range records {
@@ -393,9 +458,13 @@ func rotateBM25IfNeeded(logPath, hash string) error {
 			SizeBucket:    r.SizeBucket,
 			ToolCount:     toolCount,
 			FilesTouched:  r.FilesTouched,
+			TS:            r.TS,
 		})
 	}
-	return fresh.Save(bm25Path)
+	if err := fresh.Save(bm25Path); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func updateSketch(r store.Record) error {
@@ -407,7 +476,7 @@ func updateSketch(r store.Record) error {
 	if err != nil {
 		return err
 	}
-	defer lock.Release()
+	defer func() { _ = lock.Release() }()
 
 	s, err := store.LoadSketch()
 	if err != nil {
@@ -432,34 +501,212 @@ func shouldRetune() bool {
 	return time.Since(stat.ModTime()) > tuneStaleness
 }
 
-// loadRecordsByProjectSimple is the same as loadRecordsByProject from
-// cmd_verify but pulled inline so the auto-tune path doesn't depend on
-// flag-parsing code. Reads all per-project JSONLs into memory.
-func loadRecordsByProjectSimple() (map[string][]store.Record, error) {
-	projDir, err := store.ProjectsDir()
+// doRecordFallback is called when no pending file exists, which happens
+// when the project's local .claude/settings.json defines UserPromptSubmit
+// hooks and shadows the global hindcast pending hook. It reconstructs
+// what it needs from the transcript and the record input directly.
+//
+// No accuracy-log entry is written: there's no prediction to compare
+// against because hindcast pending never ran for this turn.
+func doRecordFallback(in recordInput) {
+	if in.SessionID == "" || in.TranscriptPath == "" {
+		return
+	}
+
+	_ = store.SweepPending(6 * time.Hour)
+	_ = store.SweepSessionMomentum(24 * time.Hour)
+
+	project := store.ResolveProject(in.CWD)
+	hash := store.ProjectHash(project)
+	arm := store.SessionArm(in.SessionID, store.ControlPctFromEnv())
+
+	// Use the fallback marker to find where we left off in this session,
+	// so we don't re-record a turn that a prior Stop already captured.
+	since := time.Now().Add(-2 * time.Hour)
+	markerPath := fallbackMarkerPath(in.SessionID)
+	if markerPath != "" {
+		if data, err := os.ReadFile(markerPath); err == nil {
+			if ts, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); err == nil {
+				since = ts.Add(time.Millisecond) // strictly after last recorded
+			}
+		}
+	}
+
+	turns, err := transcript.ParseTail(in.TranscriptPath, 4*1024*1024, since)
 	if err != nil {
-		return nil, err
+		hook.Logf("record", "fallback parse transcript: %s", err)
+		return
 	}
-	entries, err := os.ReadDir(projDir)
+	if len(turns) == 0 {
+		return
+	}
+
+	turn := turns[len(turns)-1]
+
+	// Skip degenerate turns (no wall time means the assistant never responded).
+	if turn.WallSeconds() == 0 {
+		return
+	}
+
+	var promptTokens []uint64
+	if turn.PromptText != "" {
+		if salt, err := store.GetSalt(); err == nil {
+			promptTokens = bm25.HashTokens(turn.PromptText, salt)
+		}
+	}
+
+	toolCount := 0
+	for _, n := range turn.ToolCalls {
+		toolCount += n
+	}
+
+	r := store.Record{
+		TS:                  time.Now().UTC(),
+		SessionID:           in.SessionID,
+		ProjectHash:         hash,
+		Model:               turn.Model,
+		PermissionMode:      in.PermissionMode,
+		TaskType:            string(tags.Classify(firstLine(turn.PromptText))),
+		SizeBucket:          string(sizes.Classify(turn.FilesTouched, toolCount)),
+		WallSeconds:         turn.WallSeconds(),
+		ClaudeActiveSeconds: turn.ActiveSeconds,
+		PromptChars:         len(turn.PromptText),
+		PromptTokens:        promptTokens,
+		ResponseChars:       turn.ResponseChars,
+		ToolCalls:           turn.ToolCalls,
+		FilesTouched:        turn.FilesTouched,
+		Arm:                 arm,
+	}
+
+	lockPath, err := store.LockPath(hash)
 	if err != nil {
-		return nil, err
+		hook.Logf("record", "fallback lock path: %s", err)
+		return
 	}
-	out := map[string][]store.Record{}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if len(name) < 7 || name[len(name)-6:] != ".jsonl" {
-			continue
-		}
-		path := projDir + "/" + name
-		recs, err := store.ReadRecentRecords(path, 100000)
-		if err != nil {
-			continue
-		}
-		hash := name[:len(name)-6]
-		out[hash] = recs
+	lock, err := store.AcquireLock(lockPath)
+	if err != nil {
+		hook.Logf("record", "fallback acquire lock: %s", err)
+		return
 	}
-	return out, nil
+	defer func() { _ = lock.Release() }()
+
+	// Advance the marker BEFORE the record append. Failure modes:
+	//   1. marker write fails → we exit; next call retries this turn.
+	//   2. marker write succeeds, append fails → we lose this record but
+	//      never duplicate it (next call's `since.Add(1ms)` filter
+	//      excludes the same turn).
+	//   3. all succeed → normal case.
+	// If we instead wrote marker AFTER append, a crash between append
+	// and marker write would re-record the turn next time, polluting
+	// the predictor with a duplicate. Lost-record is preferable to
+	// double-record because records are read-only inputs to a median —
+	// duplicates double-weight one observation, while a miss is just
+	// one fewer.
+	if markerPath != "" {
+		if err := os.WriteFile(markerPath, []byte(turn.PromptTS.Format(time.RFC3339Nano)), 0600); err != nil {
+			hook.Logf("record", "fallback marker write: %s", err)
+			return
+		}
+	}
+
+	logPath, err := store.ProjectLogPath(hash)
+	if err != nil {
+		hook.Logf("record", "fallback log path: %s", err)
+		return
+	}
+	if err := store.AppendRecord(logPath, r); err != nil {
+		hook.Logf("record", "fallback append: %s", err)
+		return
+	}
+
+	rotated, err := rotateBM25IfNeeded(logPath, hash)
+	if err != nil {
+		hook.Logf("record", "fallback bm25 rotate: %s", err)
+	}
+	if !rotated {
+		if err := updateBM25(hash, promptTokens, r, toolCount); err != nil {
+			hook.Logf("record", "fallback bm25 update: %s", err)
+		}
+	}
+	if err := updateSketch(r); err != nil {
+		hook.Logf("record", "fallback sketch update: %s", err)
+	}
+
+	hook.Logf("record",
+		"fallback recorded: session=%s project=%s task=%s wall=%ds active=%ds tools=%d files=%d",
+		r.SessionID, r.ProjectHash, r.TaskType,
+		r.WallSeconds, r.ClaudeActiveSeconds, toolCount, r.FilesTouched)
+
+	if sm, err := store.LoadSessionMomentum(r.SessionID); err == nil {
+		sm.AppendTurn(r.WallSeconds, r.ClaudeActiveSeconds)
+		_ = sm.Save()
+	}
+
+	if shouldRetune() {
+		spawnAutoTuneWorker()
+	}
+}
+
+// fallbackMarkerPath returns the path to the per-session marker file
+// that tracks the PromptTS of the last turn recorded via doRecordFallback.
+// Returns "" on error (caller treats as no prior marker).
+func fallbackMarkerPath(sessionID string) string {
+	dir, err := store.SessionDirPath(sessionID)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "fallback-marker")
+}
+
+// spawnAutoTuneWorker forks the hindcast binary into a detached
+// `_autotune-worker` subprocess. The subprocess outlives the Stop
+// hook's recordWorker timeout (30s), so a long tune can finish its
+// gob writes without getting killed mid-rename. Best-effort: failure
+// to start is silent — auto-tune is a polish loop, not a correctness
+// dependency.
+func spawnAutoTuneWorker() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cmd := exec.Command(exe, "_autotune-worker")
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.SysProcAttr = detachAttrs()
+	_ = cmd.Start()
+}
+
+// cmdAutoTuneWorker runs the periodic predictor refresh: tune sim
+// threshold, train regressors, persist health.json. Invoked by the
+// `_autotune-worker` subcommand spawned from doRecord / doRecordFallback.
+// Stand-alone process — not constrained by the Stop hook timeout.
+func cmdAutoTuneWorker() {
+	byProject, err := loadRecordsByProject()
+	if err != nil {
+		hook.Logf("autotune", "load records: %s", err)
+		return
+	}
+	if len(byProject) == 0 {
+		// Cold start: nothing to compute, but we must bump health.json's
+		// modtime regardless or shouldRetune() keeps spawning a new
+		// subprocess on every Stop. Save an empty-but-valid Health so
+		// the staleness check has something to compare against.
+		_ = (&health.Health{Verdict: "no records yet"}).Save()
+		return
+	}
+	sk, _ := store.LoadSketch()
+	h := health.Compute(byProject, sk, 20)
+	// Regressor refresh on the same cadence so a non-"none"
+	// h.RegressorWinner has a current model file to load. Failures
+	// are non-fatal; predict.computePrediction soft-falls-through.
+	if m, err := regressor.Train(byProject, 20); err == nil {
+		_ = m.Save()
+	}
+	if lm, err := regressor.TrainLinearFromRecords(byProject, 20, 1.0); err == nil {
+		_ = lm.Save()
+	}
+	_ = h.Save()
+	hook.Logf("autotune", "threshold=%.2f knn-malr=%.2f winner=%s lift=%.2fx n=%d",
+		h.TunedSimThreshold, h.KNNMALRAtThreshold, h.RegressorWinner, h.RegressorLiftVsLadder, h.NPredictions)
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -31,7 +30,6 @@ func parseWithUsage(name, desc string, args []string) {
 }
 
 // Silence unused import if io ever gets pulled in for help-wrapping.
-var _ = io.Discard
 
 // cmdShow dumps what hindcast has recorded. With --project P, scopes to
 // a single project; otherwise reports all projects.
@@ -138,14 +136,30 @@ func cmdShow(args []string) {
 
 // accuracyRow is one reconciled turn loaded from accuracy.jsonl.
 type accuracyRow struct {
-	TS              string `json:"ts"`
-	SessionID       string `json:"session_id"`
-	TaskType        string `json:"task_type"`
-	PredictedWall   int    `json:"predicted_wall"`
-	PredictedActive int    `json:"predicted_active"`
-	ActualWall      int    `json:"actual_wall"`
-	ActualActive    int    `json:"actual_active"`
-	Source          string `json:"source"`
+	TS               string  `json:"ts"`
+	SessionID        string  `json:"session_id"`
+	TaskType         string  `json:"task_type"`
+	PredictedWall    int     `json:"predicted_wall"`
+	PredictedActive  int     `json:"predicted_active"`
+	ActualWall       int     `json:"actual_wall"`
+	ActualActive     int     `json:"actual_active"`
+	Source           string  `json:"source"`
+	PredictedWallP25 int     `json:"predicted_wall_p25,omitempty"`
+	PredictedWallP75 int     `json:"predicted_wall_p75,omitempty"`
+	PredictedWallP10 int     `json:"predicted_wall_p10,omitempty"`
+	PredictedWallP90 int     `json:"predicted_wall_p90,omitempty"`
+	PredictedMaxSim  float64 `json:"predicted_max_sim,omitempty"`
+	VarianceGated    bool    `json:"variance_gated,omitempty"`
+}
+
+// renderedBand returns the (low, high) band the inject actually
+// surfaced to Claude for this row. Variance-gated turns get the wider
+// [P10, P90] when populated (v0.6.3+); otherwise [P25, P75].
+func (r accuracyRow) renderedBand() (int, int) {
+	if r.VarianceGated && r.PredictedWallP10 > 0 && r.PredictedWallP90 > 0 {
+		return r.PredictedWallP10, r.PredictedWallP90
+	}
+	return r.PredictedWallP25, r.PredictedWallP75
 }
 
 // showAccuracy aggregates accuracy.jsonl across one or all projects and
@@ -162,7 +176,7 @@ func showAccuracy(projectFilter string) {
 	projDir := filepath.Join(root, "projects")
 	entries, err := os.ReadDir(projDir)
 	if err != nil {
-		fmt.Println("hindcast: no accuracy data yet (need turns with predictions recorded post-v0.2)")
+		fmt.Println("hindcast: no accuracy data yet (reconciliation log is empty; predictions populate as new turns complete)")
 		return
 	}
 
@@ -207,7 +221,7 @@ func showAccuracy(projectFilter string) {
 	}
 
 	if len(rows) == 0 {
-		fmt.Println("hindcast: no accuracy data yet (need turns with predictions recorded post-v0.2)")
+		fmt.Println("hindcast: no accuracy data yet (reconciliation log is empty; predictions populate as new turns complete)")
 		return
 	}
 
@@ -248,6 +262,79 @@ func showAccuracy(projectFilter string) {
 		b := biasFactor(wallLogRatios(rs))
 		fmt.Printf("%-10s  %6d  %9.2fx  %10.2fx  %9.2fx\n", s, len(rs), wm, am, b)
 	}
+
+	// Band hit rate: among entries with band fields populated, how often
+	// did actual_wall fall inside [WallP25, WallP75]? This is the metric
+	// the inject actually targets — the point estimate is suppressed
+	// behind the variance gate when the band is wide. Point MALR
+	// penalizes regression-to-the-mean on tail outliers; band hit rate
+	// is the inject-relevant fairness measure.
+	withBand := withBandRows(rows)
+	if len(withBand) > 0 {
+		hits := 0
+		varianceGatedHits := 0
+		varianceGatedN := 0
+		pointN := 0
+		pointHits := 0
+		for _, r := range withBand {
+			lo, hi := r.renderedBand()
+			inBand := r.ActualWall >= lo && r.ActualWall <= hi
+			if inBand {
+				hits++
+			}
+			if r.VarianceGated {
+				varianceGatedN++
+				if inBand {
+					varianceGatedHits++
+				}
+			} else {
+				pointN++
+				if inBand {
+					pointHits++
+				}
+			}
+		}
+		fmt.Printf("\nband hit rate (actual ∈ rendered band): %d/%d  (%.0f%%)\n",
+			hits, len(withBand), 100*float64(hits)/float64(len(withBand)))
+		if pointN > 0 {
+			fmt.Printf("  point-rendered  [P25, P75]:  %d/%d  (%.0f%%)  ← inject showed a point; band is the implied 50%% interval (target ≈50%%)\n",
+				pointHits, pointN, 100*float64(pointHits)/float64(pointN))
+		}
+		if varianceGatedN > 0 {
+			// Pick the label based on what the entries actually rendered.
+			label := "[P25, P75]"
+			for _, r := range withBand {
+				if r.VarianceGated && r.PredictedWallP10 > 0 && r.PredictedWallP90 > 0 {
+					label = "[P10, P90]"
+					break
+				}
+			}
+			fmt.Printf("  variance-gated  %s:  %d/%d  (%.0f%%)  ← inject showed only the band (target ≈80%% if P10/P90, ≈50%% if P25/P75)\n",
+				label, varianceGatedHits, varianceGatedN, 100*float64(varianceGatedHits)/float64(varianceGatedN))
+		}
+	} else {
+		fmt.Printf("\nband hit rate: not yet computable — accuracy.jsonl entries before v0.6.1 lack band fields. Will populate as new turns record.\n")
+	}
+}
+
+// withBandRows returns accuracy rows whose band fields are populated
+// AND whose source tier is one the inject actually surfaces. Pre-v0.6.1
+// entries (no band fields) are excluded; global / none / unknown tier
+// entries are excluded because Claude never saw them — counting their
+// band against actual would be measuring something other than what was
+// rendered.
+func withBandRows(rs []accuracyRow) []accuracyRow {
+	out := make([]accuracyRow, 0, len(rs))
+	for _, r := range rs {
+		if r.PredictedWallP25 == 0 || r.PredictedWallP75 == 0 || r.ActualWall == 0 {
+			continue
+		}
+		switch r.Source {
+		case "regressor", "knn", "bucket", "project":
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func wallLogRatios(rs []accuracyRow) []float64 {
@@ -541,7 +628,6 @@ func cmdForget(args []string) {
 	fmt.Fprintf(os.Stderr, "forgot project %s; global sketch rebuilt from %d remaining records\n",
 		hash, rebuilt)
 }
-
 
 // showHealth prints the persisted tuned predictor state — the result of
 // the last `hindcast tune` run. If never tuned, suggests running it.

@@ -190,8 +190,16 @@ func TrainLinear(X [][]float64, y []float64, lambda float64) (*LinearModel, erro
 	return m, nil
 }
 
-// Predict returns log-space prediction for one feature row.
+// Predict returns log-space prediction for one feature row. Returns
+// 0 (log-space identity) if the feature vector length doesn't match
+// the model's training dimensions — defensive against a stale on-disk
+// model whose feature count drifted from the current Extract() output.
+// Without this guard the regressor tier panics in production on the
+// first call after a feature-set change.
 func (m *LinearModel) Predict(feats []float64) float64 {
+	if len(feats) != len(m.FeatureMeans) || len(feats) != len(m.FeatureStds) || len(feats) != len(m.Weights) {
+		return 0
+	}
 	pred := m.Bias
 	for j := range feats {
 		x := (feats[j] - m.FeatureMeans[j]) / m.FeatureStds[j]

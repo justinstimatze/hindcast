@@ -19,7 +19,7 @@ import (
 const MinTrainRecords = 100
 
 var (
-	errEmpty       = errors.New("regressor: no training data")
+	errEmpty        = errors.New("regressor: no training data")
 	errInsufficient = errors.New("regressor: insufficient training data")
 )
 
@@ -33,12 +33,13 @@ type Model struct {
 	FeatureNames []string
 
 	// Metadata for diagnostics + staleness.
-	TrainedAt    time.Time
-	NTrain       int
-	TrainMALR    float64 // in-sample MALR (sanity check, not held-out)
+	TrainedAt time.Time
+	NTrain    int
+	TrainMALR float64 // in-sample MALR (sanity check, not held-out)
 
 	// Train-set residual percentiles in log-space — pred minus actual.
-	// Used at predict time to render a P25/P75 band on the status line.
+	// Used at predict time to render the P25/P75 confidence band in
+	// the injected prediction block.
 	// In-sample residuals understate held-out spread; this is a "better
 	// than no band" floor, not a calibrated interval.
 	TrainResidualP25 float64
@@ -224,6 +225,9 @@ func Ensemble(regressorWall, knnWall int, maxSim float64) int {
 // the regressor doesn't depend on the predict package (would create a
 // cycle once predict imports regressor).
 func weightedMedianWall(ms []bm25.Match) float64 {
+	if len(ms) == 0 {
+		return 0
+	}
 	type wv struct{ value, weight float64 }
 	ws := make([]wv, 0, len(ms))
 	for _, m := range ms {

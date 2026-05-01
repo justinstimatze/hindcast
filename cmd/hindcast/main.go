@@ -14,7 +14,7 @@ import (
 	"github.com/justinstimatze/hindcast/internal/hook"
 )
 
-const version = "0.2.0-dev"
+const version = "0.6.7"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -32,6 +32,14 @@ func main() {
 		hook.Guard("inject", cmdInject)
 	case "mcp":
 		hook.Guard("mcp", cmdMCP)
+	case "_autotune-worker":
+		// Internal subcommand spawned detached by the Stop hook to refresh
+		// health.json + regressor models. Underscored to mark it as not
+		// part of the user-facing CLI surface; intentionally absent from
+		// --help. Lives in its own process so a long retune can't be
+		// killed by the Stop worker's 30s timeout, which would leave
+		// stale .tmp files mid-rename.
+		hook.Guard("autotune", cmdAutoTuneWorker)
 
 	// User-facing CLI.
 	case "install":
@@ -58,8 +66,6 @@ func main() {
 		cmdRotateSalt(args[1:])
 	case "predict":
 		cmdPredict(args[1:])
-	case "statusline":
-		cmdStatusline(args[1:])
 	case "verify":
 		cmdVerify(args[1:])
 	case "bench-cross":
@@ -85,7 +91,7 @@ func usage(w io.Writer) {
 
 Usage:
   hindcast install               Wire hooks + MCP into ~/.claude/settings.json,
-                                 append CLAUDE.md snippet, backfill from transcripts.
+                                 initialize per-install salt, backfill from transcripts.
   hindcast uninstall             Remove hook/MCP entries and all stored data.
   hindcast show [--project P]    Dump what hindcast has recorded.
   hindcast status                Hook health check (tail of hook.log).
@@ -101,7 +107,8 @@ Usage:
   hindcast show --health         Display tuned predictor state.
   hindcast calibrate             Online A/B analysis (control vs treatment, legacy).
   hindcast predict [PROMPT]      One-shot kNN prediction for a prompt (CLI).
-  hindcast statusline            Render the latest session's prediction (status line).
+  hindcast eval-api [-n N]       Offline A/B against the Claude API (control vs treatment).
+  hindcast export-seed           Dump the global sketch as JSON (maintainer tooling).
 
 Hooks (invoked by Claude Code; not for manual use):
   hindcast pending               UserPromptSubmit — record turn start + BM25 delivery.
@@ -109,7 +116,6 @@ Hooks (invoked by Claude Code; not for manual use):
   hindcast inject                SessionStart — inject session-scoped priors.
   hindcast mcp                   MCP stdio server — exposes hindcast_prior tool.
 
-See BOOTSTRAP.md for the full design spec.
+See README.md for usage and CHANGELOG.md for release notes.
 `)
 }
-

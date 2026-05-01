@@ -143,7 +143,11 @@ func safeIdent(s string) string {
 	return s
 }
 
-func PendingPath(sessionID string) (string, error) {
+// PendingPath returns the per-turn pending file path. v0.6.2: filename
+// now embeds the start timestamp's nanosecond stamp so multiple in-flight
+// turns in the same session don't overwrite each other. If startTS is
+// zero, the legacy single-file shape is returned (read-side compat).
+func PendingPath(sessionID string, startTS time.Time) (string, error) {
 	clean := safeIdent(sessionID)
 	if clean == "" {
 		return "", fmt.Errorf("invalid session id")
@@ -152,7 +156,52 @@ func PendingPath(sessionID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "pending-"+clean+".json"), nil
+	if startTS.IsZero() {
+		return filepath.Join(dir, "pending-"+clean+".json"), nil
+	}
+	return filepath.Join(dir, fmt.Sprintf("pending-%s-%d.json", clean, startTS.UnixNano())), nil
+}
+
+// PendingFile pairs a pending file's path with the StartTS read from it,
+// so callers can sort and consume pendings in chronological order.
+type PendingFile struct {
+	Path    string
+	StartTS time.Time
+}
+
+// ListPendingForSession returns all pending files for the given session
+// (both legacy single-file and v0.6.2 timestamped form), parsed and
+// sorted oldest-first by StartTS. Corrupt files are skipped silently —
+// the SweepPending TTL cleans them up.
+//
+// The Stop hook uses this to match each just-completed turn to the
+// pending whose StartTS is closest to the turn's prompt timestamp,
+// rather than relying on a single-file race-prone design where the
+// next prompt's UserPromptSubmit overwrites the prior turn's pending
+// before Stop can consume it.
+func ListPendingForSession(sessionID string) ([]PendingFile, error) {
+	clean := safeIdent(sessionID)
+	if clean == "" {
+		return nil, fmt.Errorf("invalid session id")
+	}
+	dir, err := TmpDir()
+	if err != nil {
+		return nil, err
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "pending-"+clean+"*.json"))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PendingFile, 0, len(matches))
+	for _, m := range matches {
+		p, err := ReadPending(m)
+		if err != nil {
+			continue
+		}
+		out = append(out, PendingFile{Path: m, StartTS: p.StartTS})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartTS.Before(out[j].StartTS) })
+	return out, nil
 }
 
 func LockPath(hash string) (string, error) {
@@ -181,11 +230,10 @@ func EstimatePath(sessionID string) (string, error) {
 	return filepath.Join(dir, "estimate-"+clean+".json"), nil
 }
 
-// LastPredictionPath is where the UserPromptSubmit hook writes the
-// current turn's kNN prediction for the status line to consume.
-// Lives under HindcastDir() (persistent, not /tmp) so a fresh terminal
-// tail can show the last value even if /tmp was cleared.
-func LastPredictionPath(sessionID string) (string, error) {
+// SessionDirPath returns the per-session directory under
+// HindcastDir/sessions/<id>/, creating it if missing. Used by the
+// Stop-hook fallback marker.
+func SessionDirPath(sessionID string) (string, error) {
 	clean := safeIdent(sessionID)
 	if clean == "" {
 		return "", fmt.Errorf("invalid session id")
@@ -198,22 +246,7 @@ func LastPredictionPath(sessionID string) (string, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "last-prediction.json"), nil
-}
-
-// CurrentSessionPointerPath is a small pointer file updated on every
-// UserPromptSubmit naming the latest session id. Lets `hindcast
-// statusline` find the active session without needing the session id
-// as an argument.
-func CurrentSessionPointerPath() (string, error) {
-	root, err := HindcastDir()
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(root, 0700); err != nil {
-		return "", err
-	}
-	return filepath.Join(root, "current-session"), nil
+	return dir, nil
 }
 
 // AccuracyLogPath is the per-project reconciliation log where the Stop
@@ -286,7 +319,7 @@ func GetSalt() ([]byte, error) {
 	lockPath := path + ".lock"
 	lock, err := AcquireLock(lockPath)
 	if err == nil {
-		defer lock.Release()
+		defer func() { _ = lock.Release() }()
 		// Re-check under the lock: another process may have generated it.
 		if data, err := os.ReadFile(path); err == nil && len(data) == SaltSize {
 			return data, nil
@@ -412,8 +445,10 @@ func isStaleLock(path string) bool {
 
 // processStartTime returns the target process's start time in platform
 // units, or 0 if unavailable. On Linux, parses field 22 of /proc/PID/stat
-// (starttime in clock ticks since boot). On other platforms, returns 0
-// and the caller falls back to PID-only liveness.
+// (starttime in clock ticks since boot). On macOS / other platforms,
+// returns 0 and the caller falls back to PID-only liveness — see
+// SECURITY.md "Known limitations" for the bounded risk of PID-recycle
+// stealing a still-live lock on darwin.
 func processStartTime(pid int) int64 {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
@@ -490,7 +525,30 @@ func marshalCapped(r Record) ([]byte, error) {
 	}
 	// Still over — drop prompt_tokens (next largest optional field).
 	r.PromptTokens = nil
-	return json.Marshal(r)
+	data, err = json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < MaxRecordSize-1 {
+		return data, nil
+	}
+	// Pathological case (Model + TaskType + SizeBucket strings overflow
+	// alone is implausible, but defend anyway). Strip Model — preserves
+	// the numeric fields the predictor actually uses.
+	r.Model = ""
+	data, err = json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < MaxRecordSize-1 {
+		return data, nil
+	}
+	// Final fallback: if a hostile-looking Record still exceeds the cap
+	// after stripping all optional/heavy fields, return it as-is along
+	// with a sentinel error. Caller (AppendRecord) currently writes the
+	// bytes regardless; the sentinel lets future callers detect the
+	// over-cap case rather than reading the line back as truncated.
+	return data, fmt.Errorf("record exceeds %d bytes after all fallbacks", MaxRecordSize)
 }
 
 func maybeRotate(path string, f *os.File) error {
@@ -509,40 +567,6 @@ func maybeRotate(path string, f *os.File) error {
 		_ = os.Rename(src, dst)
 	}
 	return os.Rename(path, path+".1")
-}
-
-// RotateWithBM25 performs log rotation AND rebuilds the associated BM25
-// index from only the records still in the active log. Without this, the
-// BM25 index grows unbounded while the JSONL log rotates segments out —
-// they go out of sync. Caller holds the project lock.
-func RotateWithBM25(logPath string, rebuildBM25 func() error) error {
-	f, err := os.Open(logPath)
-	if err != nil {
-		return nil // nothing to rotate
-	}
-	stat, err := f.Stat()
-	f.Close()
-	if err != nil || stat.Size() < LogRotateSize {
-		return nil
-	}
-	// Shift segments.
-	for i := 5; i >= 1; i-- {
-		src := fmt.Sprintf("%s.%d", logPath, i)
-		if i == 5 {
-			_ = os.Remove(src)
-			continue
-		}
-		dst := fmt.Sprintf("%s.%d", logPath, i+1)
-		_ = os.Rename(src, dst)
-	}
-	if err := os.Rename(logPath, logPath+".1"); err != nil {
-		return err
-	}
-	// With the active log now empty, rebuild the BM25 index.
-	if rebuildBM25 != nil {
-		return rebuildBM25()
-	}
-	return nil
 }
 
 func ReadRecentRecords(path string, n int) ([]Record, error) {
@@ -805,6 +829,21 @@ type PendingTurn struct {
 	PredictedWall   int    `json:"predicted_wall,omitempty"`
 	PredictedActive int    `json:"predicted_active,omitempty"`
 	PredictionSrc   string `json:"prediction_src,omitempty"`
+
+	// Band fields so the accuracy log can compute a band-hit-rate metric
+	// alongside point MALR. Without these, accuracy.jsonl only measures
+	// the point estimate — which the inject suppresses behind the
+	// variance gate when the band is wide. The band is what Claude
+	// actually sees, so it's the more meaningful target.
+	PredictedWallP25 int `json:"predicted_wall_p25,omitempty"`
+	PredictedWallP75 int `json:"predicted_wall_p75,omitempty"`
+	// v0.6.3: wider quantiles, rendered as the band when variance gate
+	// trips. Hit rate against [P10, P90] should track ~80% on calibrated
+	// kNN distributions; against [P25, P75] tracks 50%.
+	PredictedWallP10 int     `json:"predicted_wall_p10,omitempty"`
+	PredictedWallP90 int     `json:"predicted_wall_p90,omitempty"`
+	PredictedMaxSim  float64 `json:"predicted_max_sim,omitempty"`
+	VarianceGated    bool    `json:"variance_gated,omitempty"` // true when inject rendered the band as headline (no point shown)
 }
 
 func WritePending(path string, p PendingTurn) error {
@@ -831,8 +870,8 @@ func ReadPending(path string) (PendingTurn, error) {
 // --- A/B arm assignment ---
 
 const (
-	ArmControl      = "control"
-	ArmTreatment    = "treatment"
+	ArmControl        = "control"
+	ArmTreatment      = "treatment"
 	DefaultControlPct = 10
 )
 

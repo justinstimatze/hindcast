@@ -10,8 +10,13 @@ import (
 )
 
 func TestProjectHashStable(t *testing.T) {
-	if ProjectHash("hindcast") != ProjectHash("hindcast") {
-		t.Error("hash not stable")
+	// Stability across the binary's lifetime: the hash is the on-disk
+	// directory key for a project; if the formula drifts every install
+	// loses access to its own historical records. Pin to a literal so a
+	// silent change to the hash function or truncation length fails the
+	// test rather than passing a tautological self-comparison.
+	if got := ProjectHash("hindcast"); got != "1283c759" {
+		t.Errorf("ProjectHash(\"hindcast\") = %q; want 1283c759 (stability lock)", got)
 	}
 	if len(ProjectHash("hindcast")) != 8 {
 		t.Error("hash length != 8")
@@ -195,6 +200,139 @@ func TestPendingRoundtrip(t *testing.T) {
 	}
 	if !got.StartTS.Equal(p.StartTS) {
 		t.Errorf("StartTS: got %v, want %v", got.StartTS, p.StartTS)
+	}
+}
+
+// v0.6.2: PendingPath embeds StartTS in the filename so multiple
+// in-flight turns in one session don't collide. Zero startTS returns
+// the legacy single-file shape (read-side compat for old binaries
+// still in flight at upgrade time).
+func TestPendingPathTimestamped(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	t1 := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 4, 30, 12, 0, 0, 1, time.UTC)
+	p1, err := PendingPath("sess", t1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := PendingPath("sess", t2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p1 == p2 {
+		t.Errorf("two startTS values produced same path: %s", p1)
+	}
+	legacy, err := PendingPath("sess", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(legacy, "pending-sess.json") {
+		t.Errorf("legacy path lost shape: %s", legacy)
+	}
+}
+
+// TestListPendingForSessionSorts confirms multiple pending files in
+// the same session are returned oldest-first. This is the contract
+// the Stop hook depends on: pick the pending whose StartTS is closest
+// to the just-completed turn's PromptTS.
+func TestListPendingForSessionSorts(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	sess := "sess-multi"
+	now := time.Now().UTC().Truncate(time.Second)
+	stamps := []time.Time{
+		now.Add(-30 * time.Second),
+		now.Add(-10 * time.Second),
+		now.Add(-20 * time.Second),
+	}
+	for i, ts := range stamps {
+		path, err := PendingPath(sess, ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := WritePending(path, PendingTurn{SessionID: sess, StartTS: ts, TaskType: fmt.Sprintf("t%d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := ListPendingForSession(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d pendings, want 3", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].StartTS.Before(got[i-1].StartTS) {
+			t.Errorf("not sorted oldest-first: %v before %v", got[i-1].StartTS, got[i].StartTS)
+		}
+	}
+	// Oldest of the three was -30s.
+	if got[0].StartTS != stamps[0] {
+		t.Errorf("oldest mismatch: got %v, want %v", got[0].StartTS, stamps[0])
+	}
+}
+
+// TestListPendingForSessionPicksUpLegacy verifies the glob captures
+// both pending-<session>.json (pre-v0.6.2) and pending-<session>-*.json
+// (v0.6.2). Sessions started under an older binary that haven't yet
+// completed when the upgrade lands need their in-flight pending file
+// to still be readable.
+func TestListPendingForSessionPicksUpLegacy(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	sess := "sess-mix"
+	now := time.Now().UTC()
+	// Write a legacy single-file pending.
+	legacyPath, _ := PendingPath(sess, time.Time{})
+	if err := WritePending(legacyPath, PendingTurn{SessionID: sess, StartTS: now.Add(-1 * time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	// Write a v0.6.2 timestamped pending.
+	newPath, _ := PendingPath(sess, now)
+	if err := WritePending(newPath, PendingTurn{SessionID: sess, StartTS: now}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ListPendingForSession(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d pendings, want 2 (legacy + new)", len(got))
+	}
+}
+
+// v0.6.1: PendingTurn carries band fields (P25/P75, MaxSim, VarianceGated)
+// so the Stop hook can fold them into the accuracy log for band-hit-rate.
+// Verify they round-trip through WritePending/ReadPending.
+func TestPendingBandFieldsRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pending.json")
+	p := PendingTurn{
+		SessionID:        "s-band-42",
+		StartTS:          time.Now().UTC().Truncate(time.Second),
+		TaskType:         "feature",
+		ProjectHash:      "abc12345",
+		PredictedWall:    180,
+		PredictedActive:  60,
+		PredictionSrc:    "knn",
+		PredictedWallP25: 60,
+		PredictedWallP75: 600,
+		PredictedMaxSim:  0.71,
+		VarianceGated:    true,
+	}
+	if err := WritePending(path, p); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := ReadPending(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got.PredictedWallP25 != 60 || got.PredictedWallP75 != 600 {
+		t.Errorf("band p25/p75 lost in roundtrip: got %d/%d", got.PredictedWallP25, got.PredictedWallP75)
+	}
+	if got.PredictedMaxSim != 0.71 {
+		t.Errorf("max sim lost in roundtrip: got %v", got.PredictedMaxSim)
+	}
+	if !got.VarianceGated {
+		t.Errorf("variance_gated lost in roundtrip")
 	}
 }
 

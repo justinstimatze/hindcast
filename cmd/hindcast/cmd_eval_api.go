@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	iofs "io/fs"
 	"math"
 	"math/rand"
 	"net/http"
@@ -16,7 +15,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/justinstimatze/hindcast/internal/bm25"
 	"github.com/justinstimatze/hindcast/internal/seed"
 	"github.com/justinstimatze/hindcast/internal/sizes"
 	"github.com/justinstimatze/hindcast/internal/store"
@@ -24,11 +25,14 @@ import (
 	"github.com/justinstimatze/hindcast/internal/transcript"
 )
 
-// currentEvalModel is populated at cmdEvalAPI entry and read by
-// buildPriorsBlockForProject so bias factors match the model being
-// evaluated. Module-level state is slightly ugly but keeps the
-// per-sample call site terse.
-var currentEvalModel = "claude-sonnet-4-6"
+// evalCfg bundles the per-invocation configuration the eval-api helpers
+// need. Replaces module-level mutable state (`currentEvalModel`,
+// `currentInjectMode`) so concurrent invocations don't read each
+// other's settings and the dependency surface is explicit.
+type evalCfg struct {
+	Model      string // claude-* model id (used for bias-factor lookup)
+	InjectMode string // "v06" (default; v0.6.x gated band) | "legacy" (v0.1 bucket table)
+}
 
 // cmdEvalAPI runs the offline A/B against the Claude API. Samples N
 // historical turns from local transcripts (known prompts, known actual
@@ -45,6 +49,7 @@ func cmdEvalAPI(args []string) {
 	model := fl.String("model", "claude-sonnet-4-6", "Claude model to query")
 	seed := fl.Int64("seed", 42, "random seed for sample selection")
 	maxChars := fl.Int("max-prompt-chars", 4000, "skip turns whose prompt exceeds this length")
+	inject := fl.String("inject", "v06", "injection mode: v06 (gated band; default) | legacy (v0.1 full bucket table)")
 	_ = fl.Parse(args)
 
 	apiKey := loadAPIKey()
@@ -53,34 +58,32 @@ func cmdEvalAPI(args []string) {
 		os.Exit(1)
 	}
 
-	// Stash for buildPriorsBlockForProject so we resolve bias factors
-	// against the eval's target model.
-	currentEvalModel = *model
+	cfg := evalCfg{Model: *model, InjectMode: *inject}
 
-	fmt.Fprintf(os.Stderr, "eval-api: sampling up to %d turns (seed=%d, model=%s)\n", *n, *seed, *model)
-	samples := pickAPISamples(*n, *seed, *maxChars)
+	fmt.Fprintf(os.Stderr, "eval-api: sampling up to %d turns (seed=%d, model=%s, inject=%s)\n", *n, *seed, *model, *inject)
+	samples := pickAPISamples(*n, *seed, *maxChars, cfg)
 	if len(samples) == 0 {
 		fmt.Fprintln(os.Stderr, "eval-api: no historical transcripts found at ~/.claude/projects/")
 		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stderr, "eval-api: %d samples selected; running A/B against %s...\n", len(samples), *model)
 
-	results := evalAPISamples(samples, apiKey, *model)
+	results := evalAPISamples(samples, apiKey, cfg)
 	reportAPIResults(results)
 }
 
 type apiSample struct {
-	Prompt        string
-	Project       string
-	ProjectHash   string
-	ActualWall    int
-	ActualActive  int
-	TaskType      string
-	SizeBucket    string
-	PriorsBlock   string
+	Prompt       string
+	Project      string
+	ProjectHash  string
+	ActualWall   int
+	ActualActive int
+	TaskType     string
+	SizeBucket   string
+	PriorsBlock  string
 }
 
-func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
+func pickAPISamples(n int, seed int64, maxChars int, cfg evalCfg) []apiSample {
 	projectsRoot, err := findCCProjectsRoot()
 	if err != nil {
 		return nil
@@ -92,9 +95,8 @@ func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
 	rng := rand.New(rand.NewSource(seed))
 	rng.Shuffle(len(transcripts), func(i, j int) { transcripts[i], transcripts[j] = transcripts[j], transcripts[i] })
 
-	// Cache priors per project and cap samples per project so the A/B
-	// doesn't end up dominated by one chatty codebase.
-	priorsCache := map[string]string{}
+	// Cap samples per project so the A/B doesn't end up dominated by
+	// one chatty codebase.
 	perProject := map[string]int{}
 	maxPerProject := n/4 + 1
 
@@ -138,7 +140,6 @@ func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
 			for _, c := range t.ToolCalls {
 				toolCount += c
 			}
-			_ = priorsCache // kept for future caching of non-prompt-specific priors
 			// What goes to the API as the user message: rolling-window
 			// context + current prompt, matching what the product hook
 			// feeds into Claude's attention at UserPromptSubmit time.
@@ -147,7 +148,22 @@ func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
 			// user's request, silently degrading task-type selection for
 			// every post-rolling-window turn.
 			effectivePrompt := transcript.ComposeEffectiveTask(t.PromptText, path)
-			pb := buildPriorsBlockForProject(project, hash, t.PromptText, currentEvalModel)
+			// Re-run the automation check on the COMPOSED effective
+			// prompt: the rolling-window context can drag in scheduler
+			// bullets, status markers, or broken UTF-8 even when the
+			// raw user message was clean. Filtering at compose time
+			// keeps the eval inputs comparable to what a human would
+			// recognize as a real session prompt.
+			if looksAutomated(effectivePrompt) {
+				continue
+			}
+			var pb string
+			switch cfg.InjectMode {
+			case "legacy":
+				pb = buildPriorsBlockForProject(project, hash, t.PromptText, cfg.Model)
+			default: // "v06"
+				pb = buildV06InjectionForProject(hash, effectivePrompt, t.PromptText)
+			}
 			out = append(out, apiSample{
 				Prompt:       effectivePrompt,
 				Project:      project,
@@ -165,46 +181,84 @@ func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
 	return out
 }
 
-// looksAutomated flags prompts that look templated / non-interactive.
-// Round-4 panel found the initial filter missed `<task-notification>`,
-// shell paste lines, marker phrases, and too-short prompts. Widened.
+// looksAutomated flags prompts that look templated / non-interactive
+// or otherwise unfit for the eval. Two passes:
+//
+//  1. First line: strong shape signals (XML/bracket prefixes, shell
+//     pastes, scheduler bullets, status markers).
+//  2. Whole string: weaker signals that catch contamination — broken
+//     UTF-8 (non-printable leading bytes from a sliced multi-byte
+//     char) and automation markers appearing anywhere, since the
+//     eval feeds the rolling-window-effective prompt to the API and
+//     a clean human first turn can be polluted by automation in the
+//     surrounding context.
 func looksAutomated(s string) bool {
 	trimmed := strings.TrimSpace(s)
 	if len(trimmed) < 10 {
 		return true
 	}
-	// First line is the strongest signal for automation shape.
+	// Leading non-printable bytes mean the trim ate a UTF-8 fragment
+	// (continuation byte 0x80-0xBF, or a control char). Either way the
+	// prompt is corrupted and shouldn't be sent to the API.
+	if r, _ := utf8.DecodeRuneInString(trimmed); r == utf8.RuneError {
+		return true
+	}
+	first := trimmed[0]
+	if first < 0x20 || (first >= 0x80 && first < 0xC0) {
+		// non-printable ASCII or UTF-8 continuation byte at the start
+		return true
+	}
+	// First line shape checks.
 	firstLine := trimmed
 	if i := strings.IndexByte(trimmed, '\n'); i > 0 {
 		firstLine = trimmed[:i]
 	}
-	// XML/HTML-like tag prefix: <task-notification>, <system-reminder>, etc.
 	if strings.HasPrefix(firstLine, "<") && strings.Contains(firstLine, ">") {
 		return true
 	}
-	// Bracket-prefix automation ("[GAS TOWN] boot <- daemon • ...").
 	if strings.HasPrefix(firstLine, "[") && strings.Contains(firstLine, "] ") {
 		return true
 	}
-	// Bullet-date pattern (schedulers that log "• 2026-04-19T03:26").
 	if strings.Contains(firstLine, "•") && strings.Contains(firstLine, "T") {
 		return true
 	}
-	// Shell-command paste.
 	if strings.HasPrefix(firstLine, "$ ") || strings.HasPrefix(firstLine, "sudo ") {
 		return true
 	}
-	// Marker phrases — automation sends these as status updates.
+	// Whole-string marker scan: catches automation in the rolling-
+	// window context that prefixes the actual user message in the
+	// eval's effective prompt.
 	for _, m := range []string{
 		"_DONE ", "_READY ", "_COMPLETE ", "_COMPLETED",
 		"Polecat dispatched", "QUEUED NUDGE", "MERGE_READY",
 		"Boot triage:", "Formula mol-",
+		"[GAS TOWN]", "[POLECAT]", "[BUDDY]",
 	} {
-		if strings.Contains(firstLine, m) {
+		if strings.Contains(trimmed, m) {
 			return true
 		}
 	}
 	return false
+}
+
+// buildV06InjectionForProject is the eval-api treatment block for the
+// v0.6.x gated injection. Mirrors what `hindcast pending` would emit
+// at production UserPromptSubmit time: same prediction path
+// (computePrediction → predict.Predict, with freshness weighting and
+// shrinkage), same gating (tier + variance), same rendered text
+// (formatClaudeInjection). Returns "" when the gate suppresses output;
+// the eval treats that as "no priors available" — same as the control
+// arm — so suppressed cases drop out of the lift comparison rather
+// than being scored as "treatment with empty priors."
+func buildV06InjectionForProject(hash, effectivePrompt, rawPrompt string) string {
+	salt, err := store.GetSalt()
+	var tokens []uint64
+	if err == nil {
+		tokens = bm25.HashTokens(effectivePrompt, salt)
+	}
+	taskType := string(tags.Classify(firstLine(rawPrompt)))
+	pred := computePrediction(hash, tokens, taskType, "eval-api", len(rawPrompt))
+	return formatClaudeInjection(pred)
 }
 
 // buildPriorsBlockForProject returns a task-type-matched priors block
@@ -307,12 +361,12 @@ type apiEvalResult struct {
 	ArmB   apiEstimate // treatment (with priors)
 }
 
-func evalAPISamples(samples []apiSample, apiKey, model string) []apiEvalResult {
+func evalAPISamples(samples []apiSample, apiKey string, cfg evalCfg) []apiEvalResult {
 	client := &http.Client{Timeout: 60 * time.Second}
 	var results []apiEvalResult
 	for i, s := range samples {
-		a := queryEstimate(client, apiKey, model, s.Prompt, "")
-		b := queryEstimate(client, apiKey, model, s.Prompt, s.PriorsBlock)
+		a := queryEstimate(client, apiKey, cfg, s.Prompt, "")
+		b := queryEstimate(client, apiKey, cfg, s.Prompt, s.PriorsBlock)
 		results = append(results, apiEvalResult{Sample: s, ArmA: a, ArmB: b})
 		fmt.Fprintf(os.Stderr, "  [%2d/%d] actual=%4ds  A=%5ds (ok=%v)  B=%5ds (ok=%v)  %q\n",
 			i+1, len(samples),
@@ -325,12 +379,14 @@ func evalAPISamples(samples []apiSample, apiKey, model string) []apiEvalResult {
 	return results
 }
 
-func queryEstimate(client *http.Client, apiKey, model, prompt, priorsBlock string) apiEstimate {
-	// Levers 1 + 3: imperative framing + few-shot examples. Priors are
-	// Lever 2 (task-matched) delivered via the priorsBlock built upstream.
+func queryEstimate(client *http.Client, apiKey string, cfg evalCfg, prompt, priorsBlock string) apiEstimate {
 	var system string
 	if priorsBlock != "" {
-		system = priorsBlock + `
+		// Pick the system prompt that matches the priors block format.
+		// v0.6.x: gated band injection mirroring the production hook
+		// output. legacy: v0.1 full bucket table.
+		if cfg.InjectMode == "legacy" {
+			system = priorsBlock + `
 
 You are an experienced software engineer estimating how long a task will take.
 
@@ -340,26 +396,26 @@ RULES:
 3. Do NOT reason from the prompt's wording ("thorough", "quick", "moderate").
 4. Just look up the number and call hindcast_estimate with it.
 
-GOOD example:
-  Prompt: "add retry logic to fetcher"
-  Priors block says: feature bucket wall p75 = 3.2m (192s)
-  → hindcast_estimate(wall_seconds=192, active_seconds=60)
-  (You used the number from the priors. You did not add your own intuition.)
-
-BAD example (anti-pattern):
-  Prompt: "add retry logic to fetcher"
-  Priors block says: feature bucket wall p75 = 3.2m
-  Your response: "This sounds moderately complex, probably 15-30 minutes..."
-  (You overrode the priors with semantic intuition. Don't do this.)
-
 Call hindcast_estimate once at the start of your response. wall_seconds is the user-experienced duration including approvals and AFK; active_seconds is just Claude's own compute time.`
+		} else {
+			// v06: mirror what production CLAUDE.md instructs.
+			system = priorsBlock + `
+
+You are an experienced software engineer estimating how long a coding task will take.
+
+When the hindcast prediction block above is present, use the injected band as your baseline. The block reports either a point estimate with implied [P25, P75] interval, or a [P10, P90] band when uncertainty is high — read what's actually rendered.
+
+Override the prediction only if the prompt has a structural reason the predictor cannot see (much larger scope, blocked on a long external process). When you override, do NOT pad out of caution: decompose the task into verify-existing vs implement-fresh and estimate each tightly.
+
+Call hindcast_estimate once at the start of your response with your committed wall_seconds and active_seconds. wall_seconds = user-experienced duration including approvals and AFK; active_seconds = Claude's compute-only time.`
+		}
 	} else {
-		// Control arm — no priors, natural estimate.
-		system = "You are an experienced software engineer estimating how long a task will take. Call the hindcast_estimate tool with your best guess. wall_seconds is user-experienced duration (including approvals and AFK); active_seconds is Claude's compute-only time."
+		// Control arm — no priors, natural estimate. Identical for both modes.
+		system = "You are an experienced software engineer estimating how long a coding task will take. Call the hindcast_estimate tool with your best guess. wall_seconds = user-experienced duration including approvals and AFK; active_seconds = Claude's compute-only time."
 	}
 
 	reqBody := map[string]any{
-		"model":      model,
+		"model":      cfg.Model,
 		"max_tokens": 1024,
 		"system":     system,
 		"messages":   []any{map[string]any{"role": "user", "content": prompt}},
@@ -405,7 +461,7 @@ Call hindcast_estimate once at the start of your response. wall_seconds is the u
 			continue
 		}
 		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		if resp.StatusCode == 429 || resp.StatusCode == 529 || (resp.StatusCode >= 500 && resp.StatusCode < 600) {
 			lastReason = fmt.Sprintf("http %d (retrying)", resp.StatusCode)
@@ -571,7 +627,3 @@ func truncate(s string, max int) string {
 	}
 	return s
 }
-
-// Silence unused imports on some platforms.
-var _ iofs.DirEntry
-var _ = filepath.Join

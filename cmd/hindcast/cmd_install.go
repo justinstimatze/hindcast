@@ -106,10 +106,20 @@ func mergeClaudeSettings(exe string) error {
 		return err
 	}
 
+	// Preserve the existing file's mode rather than always writing 0644.
+	// Settings often contains paths to other tools' commands and (in some
+	// configurations) MCP env values; if the user wrote it 0600 we should
+	// not downgrade their privacy posture on rewrite. Default is 0600 for
+	// fresh-install (no existing file).
+	var settingsMode os.FileMode = 0600
+
 	var settings map[string]any
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:
+		if info, statErr := os.Stat(path); statErr == nil {
+			settingsMode = info.Mode().Perm()
+		}
 		backupPath := path + ".hindcast-backup-" + time.Now().Format("20060102-150405")
 		if err := os.WriteFile(backupPath, data, 0600); err != nil {
 			return fmt.Errorf("backup: %w", err)
@@ -146,36 +156,23 @@ func mergeClaudeSettings(exe string) error {
 	}
 	settings["mcpServers"] = mcps
 
-	// statusLine: non-destructive. If the user already has one configured,
-	// leave it alone and print a hint. Otherwise install `hindcast statusline`
-	// so predictions render in the bottom bar. The status line is the
-	// human-facing surface that replaced the deprecated Claude-context
-	// injection path — leaving it unwired would ship the predictor to
-	// nowhere.
-	statusLineSet := false
-	if existing, ok := settings["statusLine"].(map[string]any); ok {
-		if cmd, _ := existing["command"].(string); cmd != "" && !isHindcastCmd(cmd) {
-			fmt.Fprintf(os.Stderr, "  statusLine: preserved existing (%q). To show hindcast, chain it: `%s && %s statusline`\n", cmd, cmd, exe)
-		} else if isHindcastCmd(cmd) {
-			statusLineSet = true
+	// v0.6 migration: pre-v0.6 installs wired `hindcast statusline` into
+	// settings.statusLine. The statusline subcommand no longer exists, so
+	// leaving the entry would break Claude Code's status bar with an
+	// "unknown command" error on every prompt. Remove it if it's ours;
+	// preserve any user-customized statusLine.
+	if sl, ok := settings["statusLine"].(map[string]any); ok {
+		if cmd, _ := sl["command"].(string); isLegacyHindcastStatusline(cmd) {
+			delete(settings, "statusLine")
+			fmt.Fprintln(os.Stderr, "  statusLine: removed legacy `hindcast statusline` entry (v0.6 dropped status line)")
 		}
-	}
-	if _, present := settings["statusLine"]; !present {
-		settings["statusLine"] = map[string]any{
-			"type":    "command",
-			"command": exe + " statusline",
-		}
-		statusLineSet = true
-	}
-	if statusLineSet {
-		fmt.Fprintln(os.Stderr, "  statusLine: hindcast statusline wired")
 	}
 
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(out, '\n'), 0644)
+	return os.WriteFile(path, append(out, '\n'), settingsMode)
 }
 
 // addHook appends a hindcast hook entry unless one with the same command
@@ -213,6 +210,10 @@ func unmergeClaudeSettings() error {
 		return err
 	}
 	path := filepath.Join(home, ".claude", "settings.json")
+	var settingsMode os.FileMode = 0600
+	if info, err := os.Stat(path); err == nil {
+		settingsMode = info.Mode().Perm()
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -271,9 +272,10 @@ func unmergeClaudeSettings() error {
 		}
 	}
 
-	// statusLine: only remove if it's ours; preserve user-installed ones.
+	// Also clean up any legacy v0.5-and-earlier `hindcast statusline`
+	// entry — the subcommand no longer exists.
 	if sl, ok := settings["statusLine"].(map[string]any); ok {
-		if cmd, _ := sl["command"].(string); isHindcastCmd(cmd) {
+		if cmd, _ := sl["command"].(string); isLegacyHindcastStatusline(cmd) {
 			delete(settings, "statusLine")
 		}
 	}
@@ -282,7 +284,7 @@ func unmergeClaudeSettings() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(out, '\n'), 0644)
+	return os.WriteFile(path, append(out, '\n'), settingsMode)
 }
 
 // seedIfEmpty loads the embedded priors into the global sketch if no
@@ -321,7 +323,17 @@ func isHindcastCmd(cmd string) bool {
 	base := filepath.Base(fields[0])
 	return base == "hindcast" &&
 		(fields[1] == "pending" || fields[1] == "record" ||
-			fields[1] == "inject" || fields[1] == "mcp" ||
-			fields[1] == "statusline")
+			fields[1] == "inject" || fields[1] == "mcp")
 }
 
+// isLegacyHindcastStatusline matches the pre-v0.6 status line entry so
+// install / uninstall can clean it up. The statusline subcommand was
+// removed in v0.6; an existing entry would error on every prompt.
+func isLegacyHindcastStatusline(cmd string) bool {
+	fields := strings.Fields(cmd)
+	if len(fields) < 2 {
+		return false
+	}
+	base := filepath.Base(fields[0])
+	return base == "hindcast" && fields[1] == "statusline"
+}
