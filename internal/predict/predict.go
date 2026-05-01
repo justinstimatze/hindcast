@@ -149,8 +149,19 @@ func Predict(queryHashes []uint64, idx *bm25.Index, records []store.Record, sk *
 			// (1 + alpha/sqrt(n)). Alpha=0.5 → ~19% widening at n=7,
 			// ~11% at n=20, asymptotically 1.0 (no widening) as n→∞.
 			factor := 1.0 + 0.5/math.Sqrt(float64(n))
-			shrinkWall := func(q float64) float64 { return medianWall + (q-medianWall)*factor }
-			shrinkActive := func(q float64) float64 { return medianActive + (q-medianActive)*factor }
+			// Shrinkage widens quantiles away from the median; for low
+			// quantiles (P10 especially) this can push the value below
+			// zero on small samples. Clamp at 1s — the floor of any
+			// real turn — so the inject doesn't render "0s" or worse,
+			// negative seconds, which would be meaningless to Claude.
+			clamp := func(x float64) float64 {
+				if x < 1 {
+					return 1
+				}
+				return x
+			}
+			shrinkWall := func(q float64) float64 { return clamp(medianWall + (q-medianWall)*factor) }
+			shrinkActive := func(q float64) float64 { return clamp(medianActive + (q-medianActive)*factor) }
 			return Prediction{
 				WallSeconds:   int(medianWall + 0.5),
 				ActiveSeconds: int(medianActive + 0.5),

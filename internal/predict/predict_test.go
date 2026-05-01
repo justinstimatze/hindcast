@@ -120,6 +120,31 @@ func TestPredictKNNAppliesShrinkage(t *testing.T) {
 	}
 }
 
+// v0.6.4: shrinkage on the low quantile (P10) can push the value
+// below zero on tight-clustered small samples. Clamp at 1s — the
+// floor of any real turn — so the inject doesn't render "0s" or
+// negative seconds.
+func TestPredictKNNShrinkageClampsAtOne(t *testing.T) {
+	idx := bm25.New()
+	tokens := []uint64{1, 2, 3}
+	// All wall times near each other, with a single short outlier
+	// at the bottom. Shrinkage will pull P10 below the outlier and
+	// possibly below zero.
+	for _, w := range []int{283, 283, 283} {
+		idx.Add(tokens, bm25.Doc{WallSeconds: w, ActiveSeconds: w / 2, TaskType: "feature"})
+	}
+	p := Predict(tokens, idx, nil, nil, "feature")
+	if p.WallP10 < 1 {
+		t.Errorf("WallP10 should clamp at 1, got %d", p.WallP10)
+	}
+	if p.WallP25 < 1 {
+		t.Errorf("WallP25 should clamp at 1, got %d", p.WallP25)
+	}
+	if p.ActiveP10 < 1 {
+		t.Errorf("ActiveP10 should clamp at 1, got %d", p.ActiveP10)
+	}
+}
+
 // Shrinkage factor decreases (toward 1.0) as n grows, so a large-n
 // kNN match has narrower bands than a small-n match with the same
 // underlying spread.
