@@ -96,7 +96,7 @@ func formatPrediction(p predict.Prediction) string {
 }
 
 // humanDuration renders seconds as a compact minutes/seconds string.
-// Keeps the status line short: "45s", "3m", "1h12m".
+// Compact rendering for inject + CLI: "45s", "3m", "1h12m".
 func humanDuration(s int) string {
 	if s <= 0 {
 		return "0s"

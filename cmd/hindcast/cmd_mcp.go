@@ -162,7 +162,7 @@ your context at UserPromptSubmit time. Output looks like:
 
   Hindcast prediction for this turn (calibrated from your past sessions on similar prompts):
     wall ~3m (P25–P75: 1m–8m) · active ~45s
-    source: knn sim=0.71 · n=12 · task=feature
+    source: knn sim=0.71 · n=7 · task=feature
 
 WHEN TO USE:
 

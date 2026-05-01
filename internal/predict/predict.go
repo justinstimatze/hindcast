@@ -18,9 +18,9 @@
 // tiers are populated; global is computed but the inject path
 // suppresses it (biased short on new projects).
 //
-// The injection-vs-status-line decision (anchoring trade-off, per Lou
-// et al. 2024) is handled at the rendering layer, not here. This
-// package is purely numeric.
+// The render-vs-suppress decision (anchoring trade-off, per Lou
+// et al. 2024) is handled at the rendering layer in
+// cmd_pending.formatClaudeInjection — this package is purely numeric.
 package predict
 
 import (
@@ -34,8 +34,9 @@ import (
 	"github.com/justinstimatze/hindcast/internal/store"
 )
 
-// Source names the record tier the prediction came from. Lets the
-// status-line formatter show provenance so the human can judge trust.
+// Source names the record tier the prediction came from. Carried
+// through the inject so Claude (and downstream readers like
+// `hindcast show --accuracy`) can judge how grounded each prediction is.
 type Source string
 
 const (
@@ -230,9 +231,11 @@ func Predict(queryHashes []uint64, idx *bm25.Index, records []store.Record, sk *
 	}
 
 	// SourceNone: every tier refused. Pass len(records) through as N so
-	// the status line can render a useful cold-start message instead of
-	// a bare "no data yet". Project tier needs ≥4; status line uses N to
-	// tell the user how close they are.
+	// CLI readers (`hindcast predict`, `hindcast show --accuracy`) can
+	// render a useful cold-start message instead of a bare "no data
+	// yet" — the project tier needs ≥4 records, so N tells the reader
+	// how close they are. The injection path treats SourceNone as
+	// suppressed regardless.
 	return Prediction{Source: SourceNone, TaskType: taskType, N: len(records)}
 }
 

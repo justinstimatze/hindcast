@@ -42,10 +42,11 @@ func cmdInject() {
 	_ = store.SweepPending(6 * time.Hour)
 	_ = store.SweepSessionMomentum(24 * time.Hour)
 
-	// Default post-v0.2: no SessionStart injection. Anchoring priors in
-	// Claude's context was the v0.1 mechanism; we've pivoted to a local
-	// predictor surfaced to the human via status line. Legacy stays
-	// available behind HINDCAST_LEGACY_INJECT=1 for eval-api A/B.
+	// SessionStart is silent on the default path. v0.6 moved active
+	// injection to UserPromptSubmit (cmd_pending.go formatClaudeInjection)
+	// so it can carry the per-prompt prediction. The v0.1 ungated
+	// session-scoped bucket-table inject below stays available behind
+	// HINDCAST_LEGACY_INJECT=1 for eval-api A/B research.
 	if os.Getenv("HINDCAST_LEGACY_INJECT") != "1" {
 		return
 	}

@@ -100,7 +100,7 @@ Exit code 0 on PASS, 1 on FAIL, 2 on UNDETERMINED (not enough data). Lift thresh
 
 ### Measuring it — live
 
-`hindcast show --accuracy` reads the per-project reconciliation log (predicted vs actual on every completed turn since you installed v0.2) and reports MALR by prediction source plus band hit rate.
+`hindcast show --accuracy` reads the per-project reconciliation log (predicted vs actual on every completed turn since hindcast started recording) and reports MALR by prediction source plus band hit rate.
 
 ```
 $ hindcast show --accuracy
@@ -201,7 +201,7 @@ The regressor is the v0.4 universal-features design (prompt length, task type, r
 ## Known limitations
 
 - **Windows is build-only** — hooks use `syscall.Setsid` and `/tmp` conventions that are Linux/macOS only. CI verifies the binary compiles on Windows; `install` refuses to run there.
-- **Anchoring is not eliminated, only bounded.** The variance and tier gates suppress the worst wrong-retrieval cases, but a confidently-wrong kNN match (sim ≥ the predictor's tuned floor — default 0.45 from `hindcast tune`) with a tight band still anchors. The variance gate is the main backstop. If you find Claude consistently parroting bad numbers, set `HINDCAST_INJECT=0` per-shell or open an issue with the bad-prediction example.
+- **Anchoring is not eliminated, only bounded.** The variance and tier gates suppress the worst wrong-retrieval cases, but a confidently-wrong kNN match (sim above the predictor's `knnMinSim = 0.15` floor) with a tight band still anchors. `hindcast tune` measures a per-user empirical sim cliff and persists it to `health.json` for diagnostic surfacing in `hindcast show --accuracy`; v0.6.5 does not yet wire that tuned value back into `predict.Predict` as a hard gate. The variance gate is the per-prediction backstop. If you find Claude consistently parroting bad numbers, set `HINDCAST_INJECT=0` per-shell or open an issue with the bad-prediction example.
 - **NFS home directories** break the O_APPEND atomicity guarantee per-project JSONL writes rely on.
 - **BM25 stopwords are English-only.** Non-English prompts get less filtering → slightly noisier index, slightly weaker kNN retrieval.
 - **BM25 over salt-hashed tokens loses synonym signal.** "fix" and "repair" hash differently. Privacy/retrieval tradeoff is real and bounded.

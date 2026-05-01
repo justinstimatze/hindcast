@@ -83,7 +83,7 @@ func usage(w io.Writer) {
 
 Usage:
   hindcast install               Wire hooks + MCP into ~/.claude/settings.json,
-                                 append CLAUDE.md snippet, backfill from transcripts.
+                                 initialize per-install salt, backfill from transcripts.
   hindcast uninstall             Remove hook/MCP entries and all stored data.
   hindcast show [--project P]    Dump what hindcast has recorded.
   hindcast status                Hook health check (tail of hook.log).

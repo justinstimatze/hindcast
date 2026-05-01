@@ -669,7 +669,12 @@ func doRecordFallback(in recordInput) {
 	}
 
 	if shouldRetune() {
-		go func() {
+		// v0.6.5: synchronous to bound runtime by the worker's timeout.
+		// Pre-fix this was `go func() { ... }()` which could outlive
+		// recordWorker, get killed mid `m.Save()`, and leave stale
+		// .tmp files. Same pattern as doRecord's auto-tune; missed
+		// in the first v0.6.5 sweep, fixed here.
+		func() {
 			defer func() {
 				if rec := recover(); rec != nil {
 					hook.Logf("record", "fallback auto-tune PANIC %v", rec)

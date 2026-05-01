@@ -16,11 +16,17 @@ hindcast runs entirely on your local machine. It never sends data over the netwo
 |---|---|---|
 | per-project JSONL | `~/.claude/hindcast/projects/<hash>.jsonl` | numeric stats, deterministic labels, salt-hashed prompt tokens |
 | per-project BM25 | `~/.claude/hindcast/projects/<hash>.bm25.gob` | salt-hashed inverted index, same numeric metadata |
+| per-project accuracy log | `~/.claude/hindcast/projects/<hash>/accuracy.jsonl` | predicted vs actual durations + band fields per turn; numeric only |
 | global sketch | `~/.claude/hindcast/global-sketch.json` | rolling window of wall/active seconds, no project identity |
+| predictor health | `~/.claude/hindcast/health.json` | tuned sim threshold, MALR-by-tier, regressor winner; numeric only |
+| regressor models | `~/.claude/hindcast/regressor.{gbdt,linear}.gob` | gob-encoded numeric weights + deterministic feature-name list; never user data |
 | salt | `~/.claude/hindcast/salt` | 32 random bytes, 0600 |
 | debug log | `~/.claude/hindcast/hook.log` | timestamps, hook names, session IDs, panics |
-| pending turns | `/tmp/hindcast/pending-<session>.json` | salt-hashed tokens, `cwd`, short-lived (deleted at Stop) |
-| lock files | `/tmp/hindcast/lock-*` | PID of lock holder |
+| per-session fallback marker | `~/.claude/hindcast/sessions/<id>/fallback-marker` | RFC3339 timestamp string only |
+| pending turns | `/tmp/hindcast/pending-<session>-<nanos>.json` | salt-hashed tokens, `cwd`, short-lived (deleted at Stop) |
+| MCP estimate handoff | `/tmp/hindcast/estimate-<session>.json` | wall/active integers from `hindcast_estimate` tool; consumed at next Stop |
+| session momentum | `/tmp/hindcast/session-<session>.json` | recent-turn duration integers, ≤5 entries; deleted at 24h TTL |
+| lock files | `/tmp/hindcast/lock-*` | PID:starttime of lock holder |
 
 All directories are 0700, all files 0600.
 

@@ -536,7 +536,19 @@ func marshalCapped(r Record) ([]byte, error) {
 	// alone is implausible, but defend anyway). Strip Model — preserves
 	// the numeric fields the predictor actually uses.
 	r.Model = ""
-	return json.Marshal(r)
+	data, err = json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < MaxRecordSize-1 {
+		return data, nil
+	}
+	// Final fallback: if a hostile-looking Record still exceeds the cap
+	// after stripping all optional/heavy fields, return it as-is along
+	// with a sentinel error. Caller (AppendRecord) currently writes the
+	// bytes regardless; the sentinel lets future callers detect the
+	// over-cap case rather than reading the line back as truncated.
+	return data, fmt.Errorf("record exceeds %d bytes after all fallbacks", MaxRecordSize)
 }
 
 func maybeRotate(path string, f *os.File) error {

@@ -49,7 +49,7 @@ type Health struct {
 	NBucket            int     `json:"n_bucket"`
 	LastTunedAt        string  `json:"last_tuned_at"` // RFC3339 UTC
 
-	// Verdict — single-line summary the status line and `show --health` use.
+	// Verdict — single-line summary surfaced by `show --health`.
 	Verdict string `json:"verdict"`
 
 	// Per-sim-bucket detail for debugging.

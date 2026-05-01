@@ -176,7 +176,7 @@ func showAccuracy(projectFilter string) {
 	projDir := filepath.Join(root, "projects")
 	entries, err := os.ReadDir(projDir)
 	if err != nil {
-		fmt.Println("hindcast: no accuracy data yet (need turns with predictions recorded post-v0.2)")
+		fmt.Println("hindcast: no accuracy data yet (reconciliation log is empty; predictions populate as new turns complete)")
 		return
 	}
 
@@ -221,7 +221,7 @@ func showAccuracy(projectFilter string) {
 	}
 
 	if len(rows) == 0 {
-		fmt.Println("hindcast: no accuracy data yet (need turns with predictions recorded post-v0.2)")
+		fmt.Println("hindcast: no accuracy data yet (reconciliation log is empty; predictions populate as new turns complete)")
 		return
 	}
 
