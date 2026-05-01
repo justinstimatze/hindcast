@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/justinstimatze/hindcast/internal/bm25"
 	"github.com/justinstimatze/hindcast/internal/seed"
 	"github.com/justinstimatze/hindcast/internal/sizes"
 	"github.com/justinstimatze/hindcast/internal/store"
@@ -39,12 +40,18 @@ var currentEvalModel = "claude-sonnet-4-6"
 //
 // This is the evidence that backs the README's before/after story.
 // Requires ANTHROPIC_API_KEY (from shell env or .env in cwd).
+// currentInjectMode is "v06" (default; v0.6.x gated injection) or
+// "legacy" (v0.1 ungated bucket-table). Read by pickAPISamples to
+// decide which priors block to attach to each sample.
+var currentInjectMode = "v06"
+
 func cmdEvalAPI(args []string) {
 	fl := flag.NewFlagSet("eval-api", flag.ExitOnError)
 	n := fl.Int("n", 50, "number of historical turns to evaluate")
 	model := fl.String("model", "claude-sonnet-4-6", "Claude model to query")
 	seed := fl.Int64("seed", 42, "random seed for sample selection")
 	maxChars := fl.Int("max-prompt-chars", 4000, "skip turns whose prompt exceeds this length")
+	inject := fl.String("inject", "v06", "injection mode: v06 (gated band; default) | legacy (v0.1 full bucket table)")
 	_ = fl.Parse(args)
 
 	apiKey := loadAPIKey()
@@ -56,8 +63,9 @@ func cmdEvalAPI(args []string) {
 	// Stash for buildPriorsBlockForProject so we resolve bias factors
 	// against the eval's target model.
 	currentEvalModel = *model
+	currentInjectMode = *inject
 
-	fmt.Fprintf(os.Stderr, "eval-api: sampling up to %d turns (seed=%d, model=%s)\n", *n, *seed, *model)
+	fmt.Fprintf(os.Stderr, "eval-api: sampling up to %d turns (seed=%d, model=%s, inject=%s)\n", *n, *seed, *model, *inject)
 	samples := pickAPISamples(*n, *seed, *maxChars)
 	if len(samples) == 0 {
 		fmt.Fprintln(os.Stderr, "eval-api: no historical transcripts found at ~/.claude/projects/")
@@ -147,7 +155,13 @@ func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
 			// user's request, silently degrading task-type selection for
 			// every post-rolling-window turn.
 			effectivePrompt := transcript.ComposeEffectiveTask(t.PromptText, path)
-			pb := buildPriorsBlockForProject(project, hash, t.PromptText, currentEvalModel)
+			var pb string
+			switch currentInjectMode {
+			case "legacy":
+				pb = buildPriorsBlockForProject(project, hash, t.PromptText, currentEvalModel)
+			default: // "v06"
+				pb = buildV06InjectionForProject(hash, effectivePrompt, t.PromptText)
+			}
 			out = append(out, apiSample{
 				Prompt:       effectivePrompt,
 				Project:      project,
@@ -205,6 +219,26 @@ func looksAutomated(s string) bool {
 		}
 	}
 	return false
+}
+
+// buildV06InjectionForProject is the eval-api treatment block for the
+// v0.6.x gated injection. Mirrors what `hindcast pending` would emit
+// at production UserPromptSubmit time: same prediction path
+// (computePrediction → predict.Predict, with freshness weighting and
+// shrinkage), same gating (tier + variance), same rendered text
+// (formatClaudeInjection). Returns "" when the gate suppresses output;
+// the eval treats that as "no priors available" — same as the control
+// arm — so suppressed cases drop out of the lift comparison rather
+// than being scored as "treatment with empty priors."
+func buildV06InjectionForProject(hash, effectivePrompt, rawPrompt string) string {
+	salt, err := store.GetSalt()
+	var tokens []uint64
+	if err == nil {
+		tokens = bm25.HashTokens(effectivePrompt, salt)
+	}
+	taskType := string(tags.Classify(firstLine(rawPrompt)))
+	pred := computePrediction(hash, tokens, taskType, "eval-api", len(rawPrompt))
+	return formatClaudeInjection(pred)
 }
 
 // buildPriorsBlockForProject returns a task-type-matched priors block
@@ -326,11 +360,13 @@ func evalAPISamples(samples []apiSample, apiKey, model string) []apiEvalResult {
 }
 
 func queryEstimate(client *http.Client, apiKey, model, prompt, priorsBlock string) apiEstimate {
-	// Levers 1 + 3: imperative framing + few-shot examples. Priors are
-	// Lever 2 (task-matched) delivered via the priorsBlock built upstream.
 	var system string
 	if priorsBlock != "" {
-		system = priorsBlock + `
+		// Pick the system prompt that matches the priors block format.
+		// v0.6.x: gated band injection mirroring the production hook
+		// output. legacy: v0.1 full bucket table.
+		if currentInjectMode == "legacy" {
+			system = priorsBlock + `
 
 You are an experienced software engineer estimating how long a task will take.
 
@@ -340,22 +376,22 @@ RULES:
 3. Do NOT reason from the prompt's wording ("thorough", "quick", "moderate").
 4. Just look up the number and call hindcast_estimate with it.
 
-GOOD example:
-  Prompt: "add retry logic to fetcher"
-  Priors block says: feature bucket wall p75 = 3.2m (192s)
-  → hindcast_estimate(wall_seconds=192, active_seconds=60)
-  (You used the number from the priors. You did not add your own intuition.)
-
-BAD example (anti-pattern):
-  Prompt: "add retry logic to fetcher"
-  Priors block says: feature bucket wall p75 = 3.2m
-  Your response: "This sounds moderately complex, probably 15-30 minutes..."
-  (You overrode the priors with semantic intuition. Don't do this.)
-
 Call hindcast_estimate once at the start of your response. wall_seconds is the user-experienced duration including approvals and AFK; active_seconds is just Claude's own compute time.`
+		} else {
+			// v06: mirror what production CLAUDE.md instructs.
+			system = priorsBlock + `
+
+You are an experienced software engineer estimating how long a coding task will take.
+
+When the hindcast prediction block above is present, use the injected band as your baseline. The block reports either a point estimate with implied [P25, P75] interval, or a [P10, P90] band when uncertainty is high — read what's actually rendered.
+
+Override the prediction only if the prompt has a structural reason the predictor cannot see (much larger scope, blocked on a long external process). When you override, do NOT pad out of caution: decompose the task into verify-existing vs implement-fresh and estimate each tightly.
+
+Call hindcast_estimate once at the start of your response with your committed wall_seconds and active_seconds. wall_seconds = user-experienced duration including approvals and AFK; active_seconds = Claude's compute-only time.`
+		}
 	} else {
-		// Control arm — no priors, natural estimate.
-		system = "You are an experienced software engineer estimating how long a task will take. Call the hindcast_estimate tool with your best guess. wall_seconds is user-experienced duration (including approvals and AFK); active_seconds is Claude's compute-only time."
+		// Control arm — no priors, natural estimate. Identical for both modes.
+		system = "You are an experienced software engineer estimating how long a coding task will take. Call the hindcast_estimate tool with your best guess. wall_seconds = user-experienced duration including approvals and AFK; active_seconds = Claude's compute-only time."
 	}
 
 	reqBody := map[string]any{

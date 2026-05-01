@@ -50,6 +50,21 @@ Without the prior, Claude's first-shot estimate tends to inflate — typical cas
 
 The size of the calibration lift is use-case-dependent and is not currently quantified by an A/B run against this exact injection format. The mechanism (anchoring) is documented in [Lou et al. 2024]; the gates above bound the failure case but do not eliminate it.
 
+## Empirical lift
+
+A/B against the Claude API on n=30 historical prompts from real sessions, claude-sonnet-4-6, control vs hindcast-v0.6 inject:
+
+| arm           | n  | MALR   | p90    | bias   |
+|---------------|----|--------|--------|--------|
+| stock claude  | 30 | 16.7×  | 105.9× | 16.7×  |
+| with hindcast | 30 |  2.2×  |  15.1× |  1.5×  |
+
+**Lift = 7.53× (95% CI 3.0–11.7)** — treatment reduces error with statistical confidence (CI does not cross 1.0).
+
+Stock Claude over-estimates by 16× median on agent-shaped prompts (a 60-second task gets an "18000-second" answer in some cases). Hindcast brings the median down to 2× of truth, with a slight over-estimation bias (1.5×) — much better than the stock 16.7×, slightly under-confident as a deliberate tradeoff (anchoring less than the maintainer's intuition).
+
+Reproduce with `hindcast eval-api -n 30`. Requires `ANTHROPIC_API_KEY`. Costs <$1 in API tokens. Compare modes with `-inject legacy` (v0.1 bucket-table) vs `-inject v06` (default; v0.6.x gated band).
+
 ## The predictor
 
 A BM25-weighted k-nearest-neighbors regressor over your own project's history. Given the current prompt's hashed tokens, it finds the top-k most similar past turns and takes a similarity-weighted median of their wall / active seconds. Tiers, in order:
