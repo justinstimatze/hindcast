@@ -297,40 +297,13 @@ func doRecord(in recordInput) {
 		appendAccuracyLine(pend.ProjectHash, pend, r)
 	}
 
-	// Auto-tune: refresh predictor health if stale. Cheap (~500ms),
-	// runs at most once per hour. Replaces "user remembers to run
-	// hindcast tune" with automatic background refresh from the Stop
-	// hook. v0.6.5: runs synchronously inside doRecord so it's bounded
-	// by recordWorker's timeout — previously the spawned goroutine
-	// could outlive the worker and get killed mid-rename, leaving
-	// stale .tmp files for regressor model writes.
+	// Auto-tune: refresh predictor health + regressor models if stale.
+	// Spawned as a detached subprocess so it's not constrained by
+	// recordWorker's 30s timeout — long retunes used to risk getting
+	// killed mid-rename, leaving stale .tmp files. The subprocess runs
+	// to completion independently of this Stop's lifetime.
 	if shouldRetune() {
-		func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					hook.Logf("record", "auto-tune PANIC %v", rec)
-				}
-			}()
-			byProject, err := loadRecordsByProject()
-			if err != nil {
-				return
-			}
-			sk, _ := store.LoadSketch()
-			h := health.Compute(byProject, sk, 20)
-			// Refresh persisted regressor models on the same cadence so
-			// that when h.RegressorWinner is non-"none" the file the
-			// predict path loads is current. Failures are non-fatal —
-			// predict.computePrediction soft-falls-through to the ladder.
-			if m, err := regressor.Train(byProject, 20); err == nil {
-				_ = m.Save()
-			}
-			if lm, err := regressor.TrainLinearFromRecords(byProject, 20, 1.0); err == nil {
-				_ = lm.Save()
-			}
-			_ = h.Save()
-			hook.Logf("record", "auto-tune: threshold=%.2f knn-malr=%.2f winner=%s lift=%.2fx n=%d",
-				h.TunedSimThreshold, h.KNNMALRAtThreshold, h.RegressorWinner, h.RegressorLiftVsLadder, h.NPredictions)
-		}()
+		spawnAutoTuneWorker()
 	}
 
 	// Update per-session momentum tracker so next UserPromptSubmit in
@@ -669,31 +642,7 @@ func doRecordFallback(in recordInput) {
 	}
 
 	if shouldRetune() {
-		// v0.6.5: synchronous to bound runtime by the worker's timeout.
-		// Pre-fix this was `go func() { ... }()` which could outlive
-		// recordWorker, get killed mid `m.Save()`, and leave stale
-		// .tmp files. Same pattern as doRecord's auto-tune; missed
-		// in the first v0.6.5 sweep, fixed here.
-		func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					hook.Logf("record", "fallback auto-tune PANIC %v", rec)
-				}
-			}()
-			byProject, err := loadRecordsByProject()
-			if err != nil {
-				return
-			}
-			sk, _ := store.LoadSketch()
-			h := health.Compute(byProject, sk, 20)
-			if m, err := regressor.Train(byProject, 20); err == nil {
-				_ = m.Save()
-			}
-			if lm, err := regressor.TrainLinearFromRecords(byProject, 20, 1.0); err == nil {
-				_ = lm.Save()
-			}
-			_ = h.Save()
-		}()
+		spawnAutoTuneWorker()
 	}
 }
 
@@ -706,4 +655,52 @@ func fallbackMarkerPath(sessionID string) string {
 		return ""
 	}
 	return filepath.Join(dir, "fallback-marker")
+}
+
+// spawnAutoTuneWorker forks the hindcast binary into a detached
+// `_autotune-worker` subprocess. The subprocess outlives the Stop
+// hook's recordWorker timeout (30s), so a long tune can finish its
+// gob writes without getting killed mid-rename. Best-effort: failure
+// to start is silent — auto-tune is a polish loop, not a correctness
+// dependency.
+func spawnAutoTuneWorker() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cmd := exec.Command(exe, "_autotune-worker")
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.SysProcAttr = detachAttrs()
+	_ = cmd.Start()
+}
+
+// cmdAutoTuneWorker runs the periodic predictor refresh: tune sim
+// threshold, train regressors, persist health.json. Invoked by the
+// `_autotune-worker` subcommand spawned from doRecord / doRecordFallback.
+// Stand-alone process — not constrained by the Stop hook timeout.
+func cmdAutoTuneWorker() {
+	byProject, err := loadRecordsByProject()
+	if err != nil {
+		hook.Logf("autotune", "load records: %s", err)
+		return
+	}
+	if len(byProject) == 0 {
+		return
+	}
+	sk, _ := store.LoadSketch()
+	h := health.Compute(byProject, sk, 20)
+	// Regressor refresh on the same cadence so a non-"none"
+	// h.RegressorWinner has a current model file to load. Failures
+	// are non-fatal; predict.computePrediction soft-falls-through.
+	if m, err := regressor.Train(byProject, 20); err == nil {
+		_ = m.Save()
+	}
+	if lm, err := regressor.TrainLinearFromRecords(byProject, 20, 1.0); err == nil {
+		_ = lm.Save()
+	}
+	_ = h.Save()
+	hook.Logf("autotune", "threshold=%.2f knn-malr=%.2f winner=%s lift=%.2fx n=%d",
+		h.TunedSimThreshold, h.KNNMALRAtThreshold, h.RegressorWinner, h.RegressorLiftVsLadder, h.NPredictions)
 }

@@ -269,7 +269,16 @@ func computePrediction(hash string, tokens []uint64, taskType, sessionID string,
 		return pred
 	}
 
-	p := predict.Predict(tokens, idx, records, sk, taskType)
+	// v0.6.6: consult per-user tuned sim threshold from health.json so
+	// kNN injection respects the empirical cliff `hindcast tune`
+	// measured on this user's data. Default knnMinSim = 0.15 stays as
+	// the floor when health is unavailable or hasn't tuned a higher
+	// threshold.
+	tunedFloor := 0.0
+	if h, err := health.Load(); err == nil && h != nil {
+		tunedFloor = h.TunedSimThreshold
+	}
+	p := predict.Predict(tokens, idx, records, sk, taskType, tunedFloor)
 	p.SessionID = sessionID
 	return p
 }

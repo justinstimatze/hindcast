@@ -153,7 +153,7 @@ func Compute(byProject map[string][]store.Record, sk *store.Sketch, warmup int) 
 		idx := bm25.New()
 		for i, r := range recs {
 			if i >= warmup && r.WallSeconds > 0 && len(r.PromptTokens) > 0 {
-				p := predict.Predict(r.PromptTokens, idx, recs[:i], sk, r.TaskType)
+				p := predict.Predict(r.PromptTokens, idx, recs[:i], sk, r.TaskType, 0)
 				if p.Source != predict.SourceNone {
 					rows = append(rows, prefRow{
 						source: p.Source, sim: p.MaxSim,
@@ -310,7 +310,7 @@ func evalAdaptive(h *Health, byProject map[string][]store.Record, sk *store.Sket
 			if r.WallSeconds <= 0 {
 				continue
 			}
-			lp := predict.Predict(r.PromptTokens, idx, hist, sk, r.TaskType)
+			lp := predict.Predict(r.PromptTokens, idx, hist, sk, r.TaskType, 0)
 			if lp.Source == predict.SourceNone || lp.WallSeconds <= 0 {
 				hist = append(hist, r)
 				regressor.AddRecordToIndex(idx, r)

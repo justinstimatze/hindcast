@@ -14,7 +14,7 @@ import (
 	"github.com/justinstimatze/hindcast/internal/hook"
 )
 
-const version = "0.6.5"
+const version = "0.6.6"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -32,6 +32,14 @@ func main() {
 		hook.Guard("inject", cmdInject)
 	case "mcp":
 		hook.Guard("mcp", cmdMCP)
+	case "_autotune-worker":
+		// Internal subcommand spawned detached by the Stop hook to refresh
+		// health.json + regressor models. Underscored to mark it as not
+		// part of the user-facing CLI surface; intentionally absent from
+		// --help. Lives in its own process so a long retune can't be
+		// killed by the Stop worker's 30s timeout, which would leave
+		// stale .tmp files mid-rename.
+		hook.Guard("autotune", cmdAutoTuneWorker)
 
 	// User-facing CLI.
 	case "install":

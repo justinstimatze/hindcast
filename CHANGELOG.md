@@ -4,6 +4,59 @@
 
 (none)
 
+## [0.6.6] — 2026-05-01 — subprocess auto-tune + tuned threshold wired + OSS infra
+
+### Headline
+
+Closes the deferred items from the v0.6.5 pre-public audit. Three real
+changes plus the open-source infrastructure your other repos use.
+
+### Auto-tune detached to subprocess
+
+The hourly tune+regressor refresh is now a `_autotune-worker`
+subprocess spawned detached from the Stop hook (same
+`recordParent → recordWorker` pattern the Stop hook itself uses).
+Replaces the v0.6.5 inline-synchronous attempt, which still let
+process exit kill mid-rename of the regressor models. The subprocess
+outlives the Stop hook's lifetime; gob writes finish independently.
+
+The intermediate v0.6.5 sync attempt is documented in
+`WHAT_DIDNT_WORK.md` along with the original v0.6.4-and-prior
+goroutine pattern.
+
+### Tuned sim threshold wired into predict.Predict
+
+`predict.Predict` now takes a `minSim` parameter. The live caller
+(`cmd_pending.computePrediction`) reads `health.TunedSimThreshold`
+from `health.json` and passes it through. Measurement callers
+(verify, health.Compute) pass 0 to use the stable hardcoded
+`knnMinSim = 0.15` so MALR comparisons remain consistent across
+versions.
+
+`hindcast tune` now actually gates kNN injection per user, instead
+of being reporting-only as it was through v0.6.5. Users whose
+empirical sim cliff is above 0.15 get a tighter kNN floor; users
+whose cliff is at or below 0.15 see no change.
+
+### Open-source infrastructure
+
+Following the pattern from the maintainer's other public Go repos
+(slimemold, gemot, plancheck, winze):
+
+- `.goreleaser.yaml` — cross-builds linux+darwin × amd64+arm64,
+  CGO disabled, `-trimpath` and `-s -w` ldflags, tar.gz archives.
+- `.github/workflows/release.yml` — fires on `v*` tag push, runs
+  `goreleaser-action@v6` with `--clean`. Tagged releases now ship
+  pre-built binaries.
+- `.github/workflows/codeql.yml` — Go CodeQL on push/PR plus
+  Monday 06:00 UTC cron + manual dispatch. Adds the security badge.
+- `.github/dependabot.yml` — weekly gomod (currently empty; Go
+  toolchain bumps) + github-actions updates.
+- `WHAT_DIDNT_WORK.md` — distinctive doc capturing experiments
+  that were measured and reverted. Pulls from the v0.1 → v0.6.5
+  history (status-line pivot, single-pending design, v0.4 size
+  feature leak, single-threshold sim cliff, etc.).
+
 ## [0.6.5] — 2026-05-01 — first public release
 
 Tagged the v0.6 polish series. Empirical lift over stock Claude across

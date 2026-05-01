@@ -125,14 +125,24 @@ func recencyWeight(docTS time.Time, now time.Time) float64 {
 //
 // Semantically: try kNN → task-type bucket → overall project → global
 // sketch → none. Return the first tier with enough signal.
-func Predict(queryHashes []uint64, idx *bm25.Index, records []store.Record, sk *store.Sketch, taskType string) Prediction {
+//
+// minSim overrides knnMinSim (0.15) when positive. The live caller
+// (cmd_pending.computePrediction) passes `health.TunedSimThreshold`
+// from health.json so per-user empirical cliffs gate kNN injection;
+// measurement callers (verify, health.Compute) pass 0 to use the
+// stable default and keep MALR comparisons consistent across runs.
+func Predict(queryHashes []uint64, idx *bm25.Index, records []store.Record, sk *store.Sketch, taskType string, minSim float64) Prediction {
+	floor := knnMinSim
+	if minSim > 0 && !math.IsInf(minSim, 1) {
+		floor = minSim
+	}
 	// --- kNN ---
 	if idx != nil && len(idx.Docs) > 0 && len(queryHashes) > 0 {
 		matches := idx.TopK(queryHashes, defaultK)
 		// Keep only matches above the noise floor.
 		var good []bm25.Match
 		for _, m := range matches {
-			if m.Sim >= knnMinSim {
+			if m.Sim >= floor {
 				good = append(good, m)
 			}
 		}

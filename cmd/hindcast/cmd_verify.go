@@ -72,7 +72,7 @@ func cmdVerify(args []string) {
 		for i, r := range recs {
 			if i >= *warmup && r.WallSeconds > 0 && len(r.PromptTokens) > 0 {
 				prefixRecords := recs[:i]
-				p := predict.Predict(r.PromptTokens, idx, prefixRecords, sk, r.TaskType)
+				p := predict.Predict(r.PromptTokens, idx, prefixRecords, sk, r.TaskType, 0)
 				if p.Source != predict.SourceNone {
 					vr := verifyRow{
 						predictedWall:   p.WallSeconds,

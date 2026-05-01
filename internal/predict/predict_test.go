@@ -19,7 +19,7 @@ func TestPredictKNNTierFires(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		idx.Add(tokens, bm25.Doc{WallSeconds: 100, ActiveSeconds: 50, TaskType: "refactor"})
 	}
-	p := Predict(tokens, idx, nil, nil, "refactor")
+	p := Predict(tokens, idx, nil, nil, "refactor", 0)
 	if p.Source != SourceKNN {
 		t.Fatalf("expected SourceKNN with 5 perfect matches, got %s", p.Source)
 	}
@@ -43,7 +43,7 @@ func TestPredictFallsThroughToBucket(t *testing.T) {
 		{TaskType: "refactor", WallSeconds: 180, ClaudeActiveSeconds: 90},
 		{TaskType: "refactor", WallSeconds: 210, ClaudeActiveSeconds: 105},
 	}
-	p := Predict([]uint64{1, 2, 3}, idx, records, nil, "refactor")
+	p := Predict([]uint64{1, 2, 3}, idx, records, nil, "refactor", 0)
 	if p.Source != SourceBucket {
 		t.Fatalf("expected SourceBucket fallback, got %s (wall=%d)", p.Source, p.WallSeconds)
 	}
@@ -53,7 +53,7 @@ func TestPredictFallsThroughToBucket(t *testing.T) {
 // yet" and renders an unobtrusive message; downstream code must be safe
 // against zero-valued WallSeconds.
 func TestPredictNoneWhenEmpty(t *testing.T) {
-	p := Predict(nil, nil, nil, nil, "")
+	p := Predict(nil, nil, nil, nil, "", 0)
 	if p.Source != SourceNone {
 		t.Fatalf("expected SourceNone, got %s", p.Source)
 	}
@@ -73,7 +73,7 @@ func TestPredictKNNComputesWideQuantiles(t *testing.T) {
 	for _, w := range walls {
 		idx.Add(tokens, bm25.Doc{WallSeconds: w, ActiveSeconds: w / 2, TaskType: "feature"})
 	}
-	p := Predict(tokens, idx, nil, nil, "feature")
+	p := Predict(tokens, idx, nil, nil, "feature", 0)
 	if p.Source != SourceKNN {
 		t.Fatalf("expected SourceKNN, got %s", p.Source)
 	}
@@ -96,7 +96,7 @@ func TestPredictKNNAppliesShrinkage(t *testing.T) {
 	for _, w := range walls {
 		idx.Add(tokens, bm25.Doc{WallSeconds: w, ActiveSeconds: w / 2, TaskType: "feature"})
 	}
-	p := Predict(tokens, idx, nil, nil, "feature")
+	p := Predict(tokens, idx, nil, nil, "feature", 0)
 	if p.Source != SourceKNN {
 		t.Fatalf("expected SourceKNN, got %s", p.Source)
 	}
@@ -133,7 +133,7 @@ func TestPredictKNNShrinkageClampsAtOne(t *testing.T) {
 	for _, w := range []int{283, 283, 283} {
 		idx.Add(tokens, bm25.Doc{WallSeconds: w, ActiveSeconds: w / 2, TaskType: "feature"})
 	}
-	p := Predict(tokens, idx, nil, nil, "feature")
+	p := Predict(tokens, idx, nil, nil, "feature", 0)
 	if p.WallP10 < 1 {
 		t.Errorf("WallP10 should clamp at 1, got %d", p.WallP10)
 	}
@@ -160,7 +160,7 @@ func TestPredictKNNShrinkageScalesWithN(t *testing.T) {
 		}
 		return idx
 	}
-	pSmall := Predict([]uint64{1, 2, 3}, mkIdx(1), nil, nil, "feature")
+	pSmall := Predict([]uint64{1, 2, 3}, mkIdx(1), nil, nil, "feature", 0)
 	// Force a larger n by reusing the index multiple times. defaultK=7,
 	// so we cap there regardless of repeats — but since all docs are
 	// identical, weighted quantiles stay stable. The test is mostly
@@ -216,7 +216,7 @@ func TestPredictKNNFreshnessShiftsMedianTowardRecent(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		idx.Add(tokens, bm25.Doc{WallSeconds: 300, ActiveSeconds: 150, TaskType: "feature", TS: now})
 	}
-	p := Predict(tokens, idx, nil, nil, "feature")
+	p := Predict(tokens, idx, nil, nil, "feature", 0)
 	if p.Source != SourceKNN {
 		t.Fatalf("expected SourceKNN, got %s", p.Source)
 	}
@@ -240,7 +240,7 @@ func TestPredictProjectTierWhenBucketThin(t *testing.T) {
 		{TaskType: "feature", WallSeconds: 305, ClaudeActiveSeconds: 152},
 	}
 	// "debug" has zero records; bucket fails; project (n=6) fires.
-	p := Predict(nil, nil, records, nil, "debug")
+	p := Predict(nil, nil, records, nil, "debug", 0)
 	if p.Source != SourceProject {
 		t.Fatalf("expected SourceProject, got %s", p.Source)
 	}
