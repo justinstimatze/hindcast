@@ -286,13 +286,12 @@ func errResp(id json.RawMessage, code int, msg string) mcpResponse {
 	}
 }
 
-// complexityOf returns a three-level complexity tag from the prompt's
-// character length. Short prompts (< 200 chars) tend to be quick acks
-// or questions; long prompts (>= 1000 chars) tend to be substantive
-// task requests with embedded context. Used as an additional bucket
-// stratification dimension beyond task_type × size_bucket.
-func complexityOf(prompt string) string {
-	n := len(prompt)
+// complexityOfChars returns a three-level complexity tag from a prompt
+// length in characters. Short prompts (< 200 chars) tend to be quick
+// acks or questions; long prompts (>= 1000 chars) tend to be
+// substantive task requests with embedded context. Used as an
+// additional bucket stratification dimension beyond task_type × size_bucket.
+func complexityOfChars(n int) string {
 	switch {
 	case n < 200:
 		return "short"
@@ -301,6 +300,12 @@ func complexityOf(prompt string) string {
 	default:
 		return "long"
 	}
+}
+
+// complexityOf is the string convenience wrapper used at the top of
+// hindcastPrior where we have the literal prompt in hand.
+func complexityOf(prompt string) string {
+	return complexityOfChars(len(prompt))
 }
 
 // hindcastPrior is the implementation of the hindcast_prior MCP tool.
@@ -367,7 +372,7 @@ func hindcastPrior(prompt, retrievalText, project, sessionID string) string {
 	for _, r := range records {
 		if r.TaskType == taskType {
 			matching = append(matching, r)
-			if complexityOf(strings.Repeat("x", r.PromptChars)) == promptComplexity {
+			if complexityOfChars(r.PromptChars) == promptComplexity {
 				complexMatched = append(complexMatched, r)
 			}
 		}

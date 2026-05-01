@@ -67,6 +67,7 @@ The eval-api sampler respects `ANTHROPIC_API_KEY` only; it has no project-allowl
 - **FNV-1a rather than HMAC-SHA256.** FNV is much faster; HMAC would survive salt leaks better. Upgrade deferred pending evidence the tradeoff matters.
 - **No confidentiality protection for `hook.log`.** Writes in plain text. 0600 perms only. Log rotates at 10 MB to `hook.log.1` (1-generation retention).
 - **BM25 stopwords are English-only.** Non-English prompts index more common tokens, degrading retrieval specificity. Not a security issue; adjacent limitation.
+- **macOS lock liveness is PID-only.** Linux uses `/proc/PID/stat` field 22 (process start-time in clock ticks since boot) to disambiguate a PID-recycled-since-lock-write case from a still-live holder. macOS exposes start-time via `KERN_PROC_PID` sysctl, but the current implementation doesn't read it — `processStartTime` returns 0 on darwin and `isStaleLock` falls back to `kill -0` (signal-0 reachability). PID recycling on a long-running macOS box could in theory let a fresh process steal a live lock; in practice this is bounded by macOS's 32-bit PID space (4B forks before any specific PID recycles) and the impact is one record drop, not a security failure.
 
 ### Schema migration
 

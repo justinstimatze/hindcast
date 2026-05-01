@@ -106,10 +106,20 @@ func mergeClaudeSettings(exe string) error {
 		return err
 	}
 
+	// Preserve the existing file's mode rather than always writing 0644.
+	// Settings often contains paths to other tools' commands and (in some
+	// configurations) MCP env values; if the user wrote it 0600 we should
+	// not downgrade their privacy posture on rewrite. Default is 0600 for
+	// fresh-install (no existing file).
+	var settingsMode os.FileMode = 0600
+
 	var settings map[string]any
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:
+		if info, statErr := os.Stat(path); statErr == nil {
+			settingsMode = info.Mode().Perm()
+		}
 		backupPath := path + ".hindcast-backup-" + time.Now().Format("20060102-150405")
 		if err := os.WriteFile(backupPath, data, 0600); err != nil {
 			return fmt.Errorf("backup: %w", err)
@@ -162,7 +172,7 @@ func mergeClaudeSettings(exe string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(out, '\n'), 0644)
+	return os.WriteFile(path, append(out, '\n'), settingsMode)
 }
 
 // addHook appends a hindcast hook entry unless one with the same command
@@ -200,6 +210,10 @@ func unmergeClaudeSettings() error {
 		return err
 	}
 	path := filepath.Join(home, ".claude", "settings.json")
+	var settingsMode os.FileMode = 0600
+	if info, err := os.Stat(path); err == nil {
+		settingsMode = info.Mode().Perm()
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -270,7 +284,7 @@ func unmergeClaudeSettings() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(out, '\n'), 0644)
+	return os.WriteFile(path, append(out, '\n'), settingsMode)
 }
 
 // seedIfEmpty loads the embedded priors into the global sketch if no

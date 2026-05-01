@@ -445,8 +445,10 @@ func isStaleLock(path string) bool {
 
 // processStartTime returns the target process's start time in platform
 // units, or 0 if unavailable. On Linux, parses field 22 of /proc/PID/stat
-// (starttime in clock ticks since boot). On other platforms, returns 0
-// and the caller falls back to PID-only liveness.
+// (starttime in clock ticks since boot). On macOS / other platforms,
+// returns 0 and the caller falls back to PID-only liveness — see
+// SECURITY.md "Known limitations" for the bounded risk of PID-recycle
+// stealing a still-live lock on darwin.
 func processStartTime(pid int) int64 {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {

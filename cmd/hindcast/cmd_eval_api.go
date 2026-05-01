@@ -25,11 +25,14 @@ import (
 	"github.com/justinstimatze/hindcast/internal/transcript"
 )
 
-// currentEvalModel is populated at cmdEvalAPI entry and read by
-// buildPriorsBlockForProject so bias factors match the model being
-// evaluated. Module-level state is slightly ugly but keeps the
-// per-sample call site terse.
-var currentEvalModel = "claude-sonnet-4-6"
+// evalCfg bundles the per-invocation configuration the eval-api helpers
+// need. Replaces module-level mutable state (`currentEvalModel`,
+// `currentInjectMode`) so concurrent invocations don't read each
+// other's settings and the dependency surface is explicit.
+type evalCfg struct {
+	Model      string // claude-* model id (used for bias-factor lookup)
+	InjectMode string // "v06" (default; v0.6.x gated band) | "legacy" (v0.1 bucket table)
+}
 
 // cmdEvalAPI runs the offline A/B against the Claude API. Samples N
 // historical turns from local transcripts (known prompts, known actual
@@ -40,11 +43,6 @@ var currentEvalModel = "claude-sonnet-4-6"
 //
 // This is the evidence that backs the README's before/after story.
 // Requires ANTHROPIC_API_KEY (from shell env or .env in cwd).
-// currentInjectMode is "v06" (default; v0.6.x gated injection) or
-// "legacy" (v0.1 ungated bucket-table). Read by pickAPISamples to
-// decide which priors block to attach to each sample.
-var currentInjectMode = "v06"
-
 func cmdEvalAPI(args []string) {
 	fl := flag.NewFlagSet("eval-api", flag.ExitOnError)
 	n := fl.Int("n", 50, "number of historical turns to evaluate")
@@ -60,20 +58,17 @@ func cmdEvalAPI(args []string) {
 		os.Exit(1)
 	}
 
-	// Stash for buildPriorsBlockForProject so we resolve bias factors
-	// against the eval's target model.
-	currentEvalModel = *model
-	currentInjectMode = *inject
+	cfg := evalCfg{Model: *model, InjectMode: *inject}
 
 	fmt.Fprintf(os.Stderr, "eval-api: sampling up to %d turns (seed=%d, model=%s, inject=%s)\n", *n, *seed, *model, *inject)
-	samples := pickAPISamples(*n, *seed, *maxChars)
+	samples := pickAPISamples(*n, *seed, *maxChars, cfg)
 	if len(samples) == 0 {
 		fmt.Fprintln(os.Stderr, "eval-api: no historical transcripts found at ~/.claude/projects/")
 		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stderr, "eval-api: %d samples selected; running A/B against %s...\n", len(samples), *model)
 
-	results := evalAPISamples(samples, apiKey, *model)
+	results := evalAPISamples(samples, apiKey, cfg)
 	reportAPIResults(results)
 }
 
@@ -88,7 +83,7 @@ type apiSample struct {
 	PriorsBlock  string
 }
 
-func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
+func pickAPISamples(n int, seed int64, maxChars int, cfg evalCfg) []apiSample {
 	projectsRoot, err := findCCProjectsRoot()
 	if err != nil {
 		return nil
@@ -163,9 +158,9 @@ func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
 				continue
 			}
 			var pb string
-			switch currentInjectMode {
+			switch cfg.InjectMode {
 			case "legacy":
-				pb = buildPriorsBlockForProject(project, hash, t.PromptText, currentEvalModel)
+				pb = buildPriorsBlockForProject(project, hash, t.PromptText, cfg.Model)
 			default: // "v06"
 				pb = buildV06InjectionForProject(hash, effectivePrompt, t.PromptText)
 			}
@@ -366,12 +361,12 @@ type apiEvalResult struct {
 	ArmB   apiEstimate // treatment (with priors)
 }
 
-func evalAPISamples(samples []apiSample, apiKey, model string) []apiEvalResult {
+func evalAPISamples(samples []apiSample, apiKey string, cfg evalCfg) []apiEvalResult {
 	client := &http.Client{Timeout: 60 * time.Second}
 	var results []apiEvalResult
 	for i, s := range samples {
-		a := queryEstimate(client, apiKey, model, s.Prompt, "")
-		b := queryEstimate(client, apiKey, model, s.Prompt, s.PriorsBlock)
+		a := queryEstimate(client, apiKey, cfg, s.Prompt, "")
+		b := queryEstimate(client, apiKey, cfg, s.Prompt, s.PriorsBlock)
 		results = append(results, apiEvalResult{Sample: s, ArmA: a, ArmB: b})
 		fmt.Fprintf(os.Stderr, "  [%2d/%d] actual=%4ds  A=%5ds (ok=%v)  B=%5ds (ok=%v)  %q\n",
 			i+1, len(samples),
@@ -384,13 +379,13 @@ func evalAPISamples(samples []apiSample, apiKey, model string) []apiEvalResult {
 	return results
 }
 
-func queryEstimate(client *http.Client, apiKey, model, prompt, priorsBlock string) apiEstimate {
+func queryEstimate(client *http.Client, apiKey string, cfg evalCfg, prompt, priorsBlock string) apiEstimate {
 	var system string
 	if priorsBlock != "" {
 		// Pick the system prompt that matches the priors block format.
 		// v0.6.x: gated band injection mirroring the production hook
 		// output. legacy: v0.1 full bucket table.
-		if currentInjectMode == "legacy" {
+		if cfg.InjectMode == "legacy" {
 			system = priorsBlock + `
 
 You are an experienced software engineer estimating how long a task will take.
@@ -420,7 +415,7 @@ Call hindcast_estimate once at the start of your response with your committed wa
 	}
 
 	reqBody := map[string]any{
-		"model":      model,
+		"model":      cfg.Model,
 		"max_tokens": 1024,
 		"system":     system,
 		"messages":   []any{map[string]any{"role": "user", "content": prompt}},

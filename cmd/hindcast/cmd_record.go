@@ -300,16 +300,18 @@ func doRecord(in recordInput) {
 	// Auto-tune: refresh predictor health if stale. Cheap (~500ms),
 	// runs at most once per hour. Replaces "user remembers to run
 	// hindcast tune" with automatic background refresh from the Stop
-	// hook (which is already async and detached). The tuned threshold
-	// can then be read by future UserPromptSubmit hooks for gating.
+	// hook. v0.6.5: runs synchronously inside doRecord so it's bounded
+	// by recordWorker's timeout — previously the spawned goroutine
+	// could outlive the worker and get killed mid-rename, leaving
+	// stale .tmp files for regressor model writes.
 	if shouldRetune() {
-		go func() {
+		func() {
 			defer func() {
 				if rec := recover(); rec != nil {
 					hook.Logf("record", "auto-tune PANIC %v", rec)
 				}
 			}()
-			byProject, err := loadRecordsByProjectSimple()
+			byProject, err := loadRecordsByProject()
 			if err != nil {
 				return
 			}
@@ -525,38 +527,6 @@ func shouldRetune() bool {
 	return time.Since(stat.ModTime()) > tuneStaleness
 }
 
-// loadRecordsByProjectSimple is the same as loadRecordsByProject from
-// cmd_verify but pulled inline so the auto-tune path doesn't depend on
-// flag-parsing code. Reads all per-project JSONLs into memory.
-func loadRecordsByProjectSimple() (map[string][]store.Record, error) {
-	projDir, err := store.ProjectsDir()
-	if err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(projDir)
-	if err != nil {
-		return nil, err
-	}
-	out := map[string][]store.Record{}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if len(name) < 7 || name[len(name)-6:] != ".jsonl" {
-			continue
-		}
-		path := projDir + "/" + name
-		recs, err := store.ReadRecentRecords(path, 100000)
-		if err != nil {
-			continue
-		}
-		hash := name[:len(name)-6]
-		out[hash] = recs
-	}
-	return out, nil
-}
-
 // doRecordFallback is called when no pending file exists, which happens
 // when the project's local .claude/settings.json defines UserPromptSubmit
 // hooks and shadows the global hindcast pending hook. It reconstructs
@@ -705,7 +675,7 @@ func doRecordFallback(in recordInput) {
 					hook.Logf("record", "fallback auto-tune PANIC %v", rec)
 				}
 			}()
-			byProject, err := loadRecordsByProjectSimple()
+			byProject, err := loadRecordsByProject()
 			if err != nil {
 				return
 			}
