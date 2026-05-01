@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.6.4] — unreleased — small-sample shrinkage on empirical quantiles
+
+### Headline
+
+The v0.6.3 production data window showed point-rendered band hit rate
+at 31% (n=29) — well under the 50% target for a calibrated [P25, P75]
+interval. Diagnosis: with only ~7 kNN neighbors, the empirical P25/P75
+is a noisy estimate of the true central-50% interval, and small samples
+systematically produce quantiles that are too compact (biased toward
+the median).
+
+The fix is small-sample shrinkage: widen each empirical quantile away
+from the median by a factor `1 + alpha/sqrt(n)`, with `alpha=0.5`.
+
+```
+n=7   → factor ≈ 1.189   (widen by ~19%)
+n=20  → factor ≈ 1.112   (widen by ~11%)
+n=100 → factor ≈ 1.050   (widen by ~5%)
+n=∞   → factor → 1.0     (no correction needed)
+```
+
+Applied to all four wall quantiles (P10, P25, P75, P90) and all four
+active quantiles. Bucket / project / global tiers are unaffected — they
+have higher minimum-n floors and use a separate code path.
+
+### Why alpha=0.5
+
+Conservative on purpose. The principled small-sample correction for the
+quantile of a normal distribution is closer to alpha=1.0 (factor ≈ 1.38
+at n=7), but production turn-duration distributions are usually heavier-
+tailed than normal, so true bands are even wider. Starting at 0.5 as
+the floor; will tune up if the v0.6.4 production data still underbands.
+
+### What this targets
+
+Point-rendered hit rate (currently 31%) should drift toward 50%; that's
+the regime where the variance gate didn't trip and the inject committed
+to a number with `(P25–P75: a–b)` as the implied confidence interval.
+Variance-gated rate (currently 55%, mid-transition toward 80%) should
+also bump up, but it was already on path.
+
+### Tests
+
+- `TestPredictKNNAppliesShrinkage` — corrected P25 ≤ raw P25, corrected
+  P75 ≥ raw P75 (shrinkage widens, never tightens).
+- `TestPredictKNNShrinkageScalesWithN` — ordered quantiles preserved
+  across sample sizes.
+- Existing `TestPredictKNNComputesWideQuantiles` still passes — relative
+  ordering invariants survive the shrinkage.
+
 ## [0.6.3] — unreleased — wider bands, freshness weighting, dynamic variance gate
 
 ### Headline

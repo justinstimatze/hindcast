@@ -137,18 +137,32 @@ func Predict(queryHashes []uint64, idx *bm25.Index, records []store.Record, sk *
 				walls = append(walls, weighted{float64(m.Doc.WallSeconds), w})
 				actives = append(actives, weighted{float64(m.Doc.ActiveSeconds), w})
 			}
+			n := len(good)
+			medianWall := weightedMedian(walls)
+			medianActive := weightedMedian(actives)
+			// v0.6.4: small-sample shrinkage correction. Empirical
+			// quantiles from n≈7 neighbors are systematically biased
+			// toward the median compared to the true quantiles —
+			// the v0.6.3 production data showed point-rendered band
+			// hit rate at 31% (target 50%), implying P25/P75 were too
+			// narrow. We widen each quantile away from the median by
+			// (1 + alpha/sqrt(n)). Alpha=0.5 → ~19% widening at n=7,
+			// ~11% at n=20, asymptotically 1.0 (no widening) as n→∞.
+			factor := 1.0 + 0.5/math.Sqrt(float64(n))
+			shrinkWall := func(q float64) float64 { return medianWall + (q-medianWall)*factor }
+			shrinkActive := func(q float64) float64 { return medianActive + (q-medianActive)*factor }
 			return Prediction{
-				WallSeconds:   int(weightedMedian(walls) + 0.5),
-				ActiveSeconds: int(weightedMedian(actives) + 0.5),
-				WallP25:       int(weightedQuantile(walls, 0.25) + 0.5),
-				WallP75:       int(weightedQuantile(walls, 0.75) + 0.5),
-				WallP10:       int(weightedQuantile(walls, 0.10) + 0.5),
-				WallP90:       int(weightedQuantile(walls, 0.90) + 0.5),
-				ActiveP25:     int(weightedQuantile(actives, 0.25) + 0.5),
-				ActiveP75:     int(weightedQuantile(actives, 0.75) + 0.5),
-				ActiveP10:     int(weightedQuantile(actives, 0.10) + 0.5),
-				ActiveP90:     int(weightedQuantile(actives, 0.90) + 0.5),
-				N:             len(good),
+				WallSeconds:   int(medianWall + 0.5),
+				ActiveSeconds: int(medianActive + 0.5),
+				WallP25:       int(shrinkWall(weightedQuantile(walls, 0.25)) + 0.5),
+				WallP75:       int(shrinkWall(weightedQuantile(walls, 0.75)) + 0.5),
+				WallP10:       int(shrinkWall(weightedQuantile(walls, 0.10)) + 0.5),
+				WallP90:       int(shrinkWall(weightedQuantile(walls, 0.90)) + 0.5),
+				ActiveP25:     int(shrinkActive(weightedQuantile(actives, 0.25)) + 0.5),
+				ActiveP75:     int(shrinkActive(weightedQuantile(actives, 0.75)) + 0.5),
+				ActiveP10:     int(shrinkActive(weightedQuantile(actives, 0.10)) + 0.5),
+				ActiveP90:     int(shrinkActive(weightedQuantile(actives, 0.90)) + 0.5),
+				N:             n,
 				MaxSim:        good[0].Sim,
 				Source:        SourceKNN,
 				TaskType:      taskType,
