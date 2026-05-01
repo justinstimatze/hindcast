@@ -58,8 +58,11 @@ EOF
 )
 PENDING_STDOUT=$(echo "$PENDING_INPUT" | "$HOME/hindcast" pending)
 
-PENDING_FILE="/tmp/hindcast/pending-$SESSION_ID.json"
-test -f "$PENDING_FILE" || { echo "FAIL: pending file not created at $PENDING_FILE"; exit 1; }
+# v0.6.2 pending files include the StartTS in their filename so multiple
+# in-flight turns in one session don't collide. Glob both forms — the
+# legacy single-file shape is still supported on the read side.
+PENDING_FILE=$(ls /tmp/hindcast/pending-${SESSION_ID}*.json 2>/dev/null | head -1)
+test -n "$PENDING_FILE" -a -f "$PENDING_FILE" || { echo "FAIL: pending file not created (glob: /tmp/hindcast/pending-${SESSION_ID}*.json)"; exit 1; }
 
 # Verify pending file has hashed tokens, no plaintext prompt
 grep -q "prompt_tokens" "$PENDING_FILE" || { echo "FAIL: pending missing prompt_tokens"; exit 1; }
@@ -68,44 +71,54 @@ if grep -q "refactor the fetcher" "$PENDING_FILE"; then
   exit 1
 fi
 
-# Post-v0.2 anti-anchoring invariant: default UserPromptSubmit must NOT
-# write anything to stdout (Claude Code injects stdout into the turn
-# context). The legacy anchoring path stays available behind
-# HINDCAST_LEGACY_INJECT=1 for eval-api A/B.
+# v0.6 inject is gated: emits the band block only when source ∈ {regressor,
+# kNN, bucket, project}. Synthetic project has no records so the predictor
+# falls to global tier, which is suppressed — UserPromptSubmit produces
+# no stdout for this fixture. (HINDCAST_INJECT=0 force-disables; legacy
+# v0.1 ungated injection is HINDCAST_LEGACY_INJECT=1.)
 if [[ -n "$PENDING_STDOUT" ]]; then
-  echo "FAIL: UserPromptSubmit wrote to stdout (would anchor Claude):"
+  echo "FAIL: pending unexpectedly wrote to stdout (gate should suppress for empty project):"
   echo "$PENDING_STDOUT"
   exit 1
 fi
 
-# Last-prediction file should exist for the status line to read.
-LAST_PRED="$HOME/.claude/hindcast/sessions/$SESSION_ID/last-prediction.json"
-test -f "$LAST_PRED" || { echo "FAIL: last-prediction file not written at $LAST_PRED"; exit 1; }
-grep -q "\"source\":" "$LAST_PRED" || { echo "FAIL: last-prediction missing source field"; exit 1; }
-
-# Status line command reads the pointer + last-prediction and prints one line.
-STATUSLINE_OUT=$("$HOME/hindcast" statusline)
-test -n "$STATUSLINE_OUT" || { echo "FAIL: statusline produced no output"; exit 1; }
-
-echo "  ✓ pending file written; prompt_tokens present; no plaintext; no stdout to Claude"
-echo "  ✓ last-prediction + statusline wired: $STATUSLINE_OUT"
+echo "  ✓ pending file written; prompt_tokens present; no plaintext"
 
 # ---- 2. Overwrite pending with controlled state ----
 # We've verified the hook writes the right SHAPE. Now replace it with
 # a pending record keyed to a known timestamp so the Stop hook's
 # transcript-tail parser can find our synthetic turn.
-FIXED_TS="2024-01-01T00:00:00.000Z"
-cat > "$PENDING_FILE" <<EOF
-{"session_id":"$SESSION_ID","start_ts":"$FIXED_TS","task_type":"feature","prompt_tokens":[1,2,3,4,5],"prompt_chars":40,"permission_mode":"auto-accept","project_hash":"$PROJECT_HASH","cwd":"$PROJECT_DIR","arm":"treatment"}
+# v0.6.2 doRecord parses the transcript tail since (now - 6h) so the
+# synthetic timestamps below have to be recent or the parser filters
+# them out. Generate dynamic timestamps anchored to "a few minutes ago"
+# in RFC 3339 millisecond shape that matches CC transcript output.
+ts_offset_ago() {
+  # Args: seconds-ago
+  if date -u -d "@$(($(date +%s) - $1))" "+%Y-%m-%dT%H:%M:%S.000Z" 2>/dev/null; then return; fi
+  # macOS BSD date fallback
+  date -u -r "$(($(date +%s) - $1))" "+%Y-%m-%dT%H:%M:%S.000Z"
+}
+PROMPT_TS=$(ts_offset_ago 60)
+ASSISTANT_T1=$(ts_offset_ago 58)
+ASSISTANT_T2=$(ts_offset_ago 55)
+ASSISTANT_T3=$(ts_offset_ago 54)
+
+# Write the controlled pending into the legacy single-file path so the
+# Stop hook's ListPendingForSession glob picks it up unambiguously.
+LEGACY_PENDING="/tmp/hindcast/pending-${SESSION_ID}.json"
+rm -f /tmp/hindcast/pending-${SESSION_ID}*.json
+cat > "$LEGACY_PENDING" <<EOF
+{"session_id":"$SESSION_ID","start_ts":"$PROMPT_TS","task_type":"feature","prompt_tokens":[1,2,3,4,5],"prompt_chars":40,"permission_mode":"auto-accept","project_hash":"$PROJECT_HASH","cwd":"$PROJECT_DIR","arm":"treatment"}
 EOF
+PENDING_FILE="$LEGACY_PENDING"
 
 # ---- 3. Build a synthetic transcript whose timestamps are AFTER start_ts ----
 TRANSCRIPT="$HOME/.claude/projects/fake.jsonl"
 cat > "$TRANSCRIPT" <<EOF
-{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"refactor the fetcher to use a client"},"uuid":"u1","timestamp":"2024-01-01T00:00:01.000Z","sessionId":"$SESSION_ID","cwd":"$PROJECT_DIR"}
-{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"$PROJECT_DIR/fetcher.go"}}]},"uuid":"a1","timestamp":"2024-01-01T00:00:03.000Z","sessionId":"$SESSION_ID"}
-{"parentUuid":"a1","isSidechain":false,"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"tool_use","id":"tu2","name":"Edit","input":{"file_path":"$PROJECT_DIR/fetcher.go","old_string":"x","new_string":"y"}}]},"uuid":"a2","timestamp":"2024-01-01T00:00:05.000Z","sessionId":"$SESSION_ID"}
-{"parentUuid":"a2","isSidechain":false,"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"text","text":"done"}]},"uuid":"a3","timestamp":"2024-01-01T00:00:06.000Z","sessionId":"$SESSION_ID"}
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"refactor the fetcher to use a client"},"uuid":"u1","timestamp":"$PROMPT_TS","sessionId":"$SESSION_ID","cwd":"$PROJECT_DIR"}
+{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"$PROJECT_DIR/fetcher.go"}}]},"uuid":"a1","timestamp":"$ASSISTANT_T1","sessionId":"$SESSION_ID"}
+{"parentUuid":"a1","isSidechain":false,"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"tool_use","id":"tu2","name":"Edit","input":{"file_path":"$PROJECT_DIR/fetcher.go","old_string":"x","new_string":"y"}}]},"uuid":"a2","timestamp":"$ASSISTANT_T2","sessionId":"$SESSION_ID"}
+{"parentUuid":"a2","isSidechain":false,"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"text","text":"done"}]},"uuid":"a3","timestamp":"$ASSISTANT_T3","sessionId":"$SESSION_ID"}
 EOF
 
 # ---- 4. hindcast_estimate MCP tool (before Stop, so the file is ready) ----

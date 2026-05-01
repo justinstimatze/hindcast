@@ -523,6 +523,17 @@ func marshalCapped(r Record) ([]byte, error) {
 	}
 	// Still over — drop prompt_tokens (next largest optional field).
 	r.PromptTokens = nil
+	data, err = json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < MaxRecordSize-1 {
+		return data, nil
+	}
+	// Pathological case (Model + TaskType + SizeBucket strings overflow
+	// alone is implausible, but defend anyway). Strip Model — preserves
+	// the numeric fields the predictor actually uses.
+	r.Model = ""
 	return json.Marshal(r)
 }
 
@@ -542,40 +553,6 @@ func maybeRotate(path string, f *os.File) error {
 		_ = os.Rename(src, dst)
 	}
 	return os.Rename(path, path+".1")
-}
-
-// RotateWithBM25 performs log rotation AND rebuilds the associated BM25
-// index from only the records still in the active log. Without this, the
-// BM25 index grows unbounded while the JSONL log rotates segments out —
-// they go out of sync. Caller holds the project lock.
-func RotateWithBM25(logPath string, rebuildBM25 func() error) error {
-	f, err := os.Open(logPath)
-	if err != nil {
-		return nil // nothing to rotate
-	}
-	stat, err := f.Stat()
-	f.Close()
-	if err != nil || stat.Size() < LogRotateSize {
-		return nil
-	}
-	// Shift segments.
-	for i := 5; i >= 1; i-- {
-		src := fmt.Sprintf("%s.%d", logPath, i)
-		if i == 5 {
-			_ = os.Remove(src)
-			continue
-		}
-		dst := fmt.Sprintf("%s.%d", logPath, i+1)
-		_ = os.Rename(src, dst)
-	}
-	if err := os.Rename(logPath, logPath+".1"); err != nil {
-		return err
-	}
-	// With the active log now empty, rebuild the BM25 index.
-	if rebuildBM25 != nil {
-		return rebuildBM25()
-	}
-	return nil
 }
 
 func ReadRecentRecords(path string, n int) ([]Record, error) {
@@ -844,8 +821,8 @@ type PendingTurn struct {
 	// the point estimate — which the inject suppresses behind the
 	// variance gate when the band is wide. The band is what Claude
 	// actually sees, so it's the more meaningful target.
-	PredictedWallP25 int     `json:"predicted_wall_p25,omitempty"`
-	PredictedWallP75 int     `json:"predicted_wall_p75,omitempty"`
+	PredictedWallP25 int `json:"predicted_wall_p25,omitempty"`
+	PredictedWallP75 int `json:"predicted_wall_p75,omitempty"`
 	// v0.6.3: wider quantiles, rendered as the band when variance gate
 	// trips. Hit rate against [P10, P90] should track ~80% on calibrated
 	// kNN distributions; against [P25, P75] tracks 50%.
@@ -879,8 +856,8 @@ func ReadPending(path string) (PendingTurn, error) {
 // --- A/B arm assignment ---
 
 const (
-	ArmControl      = "control"
-	ArmTreatment    = "treatment"
+	ArmControl        = "control"
+	ArmTreatment      = "treatment"
 	DefaultControlPct = 10
 )
 

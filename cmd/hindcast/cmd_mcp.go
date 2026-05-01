@@ -153,52 +153,54 @@ func handleMCP(enc *json.Encoder, req mcpRequest) {
 }
 
 // mcpInstructions is the behavioral contract delivered via the MCP
-// server's initialize response. Replaces the earlier CLAUDE.md snippet
-// so install stops touching ~/.claude/CLAUDE.md — cleaner install/
-// uninstall, instructions travel with the tool.
+// server's initialize response. Mirrors the production CLAUDE.md
+// guidance so the same instructions travel with the tool to whatever
+// MCP client uses it (not just Claude Code).
 const mcpInstructions = `hindcast records wall-clock and active-time
-priors for CC sessions and injects them back as session context.
+priors from your past sessions and injects a calibrated band into
+your context at UserPromptSubmit time. Output looks like:
 
-HOW TO ESTIMATE:
+  Hindcast prediction for this turn (calibrated from your past sessions on similar prompts):
+    wall ~3m (P25–P75: 1m–8m) · active ~45s
+    source: knn sim=0.71 · n=12 · task=feature
 
-1. At UserPromptSubmit, you receive a task-matched priors block with a
-   specific bucket wall p75 in seconds. USE THAT NUMBER. Do not adjust
-   for perceived complexity — the bucket already encodes complexity.
-   Do not reason from prompt wording like "thorough" or "quick" or
-   "moderate". Just look up the bucket p75 and use it.
+WHEN TO USE:
 
-2. Call hindcast_estimate at the start of any response with a
-   wall-clock implication:
+When the user asks about a duration ("how long will X take", a plan-step
+ETA, scope sizing), use the injected band as your baseline. Cite as
+"~Xm wall (P25–P75: a–b, source n=N)". The exact form Claude Code wants
+is a literal substring; downstream tooling parses it.
 
-     hindcast_estimate(
-       session_id="<from the SessionStart priors block>",
-       wall_seconds=<bucket wall p75>,
-       active_seconds=<bucket active p75>,
-     )
+WHEN NOT TO CITE:
 
-GOOD example:
-  Prompt: "add retry logic to fetcher"
-  Priors block: feature bucket wall p75 = 3.2m (192s), active p75 = 1m (60s)
-  → hindcast_estimate(session_id="...", wall_seconds=192, active_seconds=60)
+The injected prediction is for the current chat reply and the band is
+small (under ~3m). There's no cone of uncertainty on a one-minute reply;
+citing it is self-narration noise. The injection is a tool, not a thing
+to perform back at the user.
 
-BAD example (anti-pattern):
-  Prompt: "add retry logic to fetcher"
-  Priors block: feature bucket wall p75 = 3.2m
-  Your response: "This sounds moderately complex, probably 15-30 minutes..."
-  (You overrode the priors with semantic intuition. Don't do this.)
+OVERRIDE DISCIPLINE:
 
-FALLBACK ORDER when priors are sparse:
-  - Use task-matched bucket p75 (ideal).
-  - If bucket has n<3, use overall project wall p75.
-  - If project has no data, use the global sketch median.
+When the kNN match is for prompt-pattern but the user is asking about
+task-scope (much larger), override and say so. Do NOT pad the override
+out of caution — decompose into "verify-existing vs implement-fresh"
+and estimate each tightly. The bias hindcast is meant to fix is the
+stock 5-10x inflation on agent-shaped tasks; caution-padding undoes
+the lift.
 
-OTHER:
-  - Control-arm sessions get no priors injection. Call hindcast_estimate
-    anyway — that's the measurement floor for the A/B lift computation.
-  - Call hindcast_prior inside plan generation to attach calibrated
-    per-step wall-clock estimates.
-  - "wall" is user-experienced duration (approvals + AFK); "active" is
-    Claude's compute-only time.`
+TOOLS:
+
+  hindcast_prior(prompt, [project], [session_id])
+    Per-prompt lookup. Use inside plans when you want per-step
+    calibrated durations beyond the single injected prior.
+
+  hindcast_estimate(session_id, wall_seconds, active_seconds)
+    Record your own committed estimate at the start of any wall-clock
+    response. The Stop hook folds it into the turn's record so the
+    accuracy log can compute Claude-vs-actual MALR.
+
+DURATIONS:
+  wall = user-experienced duration including approvals and AFK time.
+  active = Claude's compute-only time (tool execution + reasoning).`
 
 func priorToolDefinition() map[string]any {
 	return map[string]any{

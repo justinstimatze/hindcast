@@ -147,7 +147,7 @@ func TestFormatClaudeInjectionSourceRendering(t *testing.T) {
 		{
 			"regressor without detail degrades cleanly",
 			predict.Prediction{
-				Source: predict.SourceRegressor, // no SourceDetail
+				Source:      predict.SourceRegressor, // no SourceDetail
 				WallSeconds: 60, WallP25: 45, WallP75: 90, N: 5,
 			},
 			"source: regressor",
@@ -227,9 +227,9 @@ func TestFormatClaudeInjectionDynamicVarianceThreshold(t *testing.T) {
 	// Ratio = 2.5 (P75/P25 = 100/40). Above the small-n threshold (2.0)
 	// but below the base threshold (3.0). Behavior depends on n / MaxSim.
 	cases := []struct {
-		name       string
-		p          predict.Prediction
-		wantPoint  bool // true: point estimate rendered (no high-uncertainty)
+		name      string
+		p         predict.Prediction
+		wantPoint bool // true: point estimate rendered (no high-uncertainty)
 	}{
 		{
 			"large-n, high-sim → point rendered (ratio 2.5 < base 3.0)",

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -13,10 +15,10 @@ import (
 // with long. Within-session correlation is a predictor the
 // project×task×size buckets don't capture.
 type SessionMomentum struct {
-	SessionID string    `json:"session_id"`
-	Updated   time.Time `json:"updated"`
-	WallTurns []int     `json:"wall_turns"`   // last N wall_seconds
-	ActiveTurns []int   `json:"active_turns"` // parallel
+	SessionID   string    `json:"session_id"`
+	Updated     time.Time `json:"updated"`
+	WallTurns   []int     `json:"wall_turns"`   // last N wall_seconds
+	ActiveTurns []int     `json:"active_turns"` // parallel
 }
 
 // momentumMaxTurns caps the rolling window. Five is plenty for
@@ -116,27 +118,18 @@ func intMedian(xs []int) int {
 	if len(xs) == 0 {
 		return 0
 	}
-	copy := append([]int(nil), xs...)
-	sortInts(copy)
-	mid := len(copy) / 2
-	if len(copy)%2 == 0 {
-		return (copy[mid-1] + copy[mid]) / 2
+	sorted := append([]int(nil), xs...)
+	sort.Ints(sorted)
+	mid := len(sorted) / 2
+	if len(sorted)%2 == 0 {
+		return (sorted[mid-1] + sorted[mid]) / 2
 	}
-	return copy[mid]
+	return sorted[mid]
 }
 
-func sortInts(xs []int) {
-	// Simple insertion sort — input is always <= momentumMaxTurns
-	// so O(n²) is fine and avoids pulling in sort.Ints noise.
-	for i := 1; i < len(xs); i++ {
-		for j := i; j > 0 && xs[j-1] > xs[j]; j-- {
-			xs[j-1], xs[j] = xs[j], xs[j-1]
-		}
-	}
-}
-
-// SweepSessionMomentum deletes session files older than maxAge. Called
-// alongside pending-file TTL sweep.
+// SweepSessionMomentum deletes session-momentum files older than
+// maxAge. Wired into hooks alongside SweepPending so abandoned session
+// state doesn't accumulate in /tmp/hindcast/ over time.
 func SweepSessionMomentum(maxAge time.Duration) error {
 	dir, err := TmpDir()
 	if err != nil {
@@ -151,7 +144,7 @@ func SweepSessionMomentum(maxAge time.Duration) error {
 		if e.IsDir() {
 			continue
 		}
-		if !hasPrefix(e.Name(), "session-") {
+		if !strings.HasPrefix(e.Name(), "session-") {
 			continue
 		}
 		info, err := e.Info()
@@ -163,11 +156,4 @@ func SweepSessionMomentum(maxAge time.Duration) error {
 		}
 	}
 	return nil
-}
-
-func hasPrefix(s, p string) bool {
-	if len(s) < len(p) {
-		return false
-	}
-	return s[:len(p)] == p
 }

@@ -323,4 +323,3 @@ func isLegacyHindcastStatusline(cmd string) bool {
 	base := filepath.Base(fields[0])
 	return base == "hindcast" && fields[1] == "statusline"
 }
-

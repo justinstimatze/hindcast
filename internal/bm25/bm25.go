@@ -58,9 +58,9 @@ type Doc struct {
 
 type Index struct {
 	// Postings: salted-token-hash → posting list sorted by DocID ascending.
-	Postings map[uint64][]Posting
-	Docs     []Doc
-	TotalLen int
+	Postings  map[uint64][]Posting
+	Docs      []Doc
+	TotalLen  int
 	AvgDocLen float64
 }
 

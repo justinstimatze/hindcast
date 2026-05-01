@@ -1,14 +1,26 @@
-// Package predict is hindcast's human-facing duration predictor.
-// Replaces the earlier "inject priors into Claude's context" mechanism
-// (which exploited LLM anchoring per Lou et al. 2024) with a local
-// numeric predictor whose output is surfaced to the human via Claude
-// Code's status line — Claude never sees it, so anchoring can't fire.
+// Package predict is hindcast's local duration predictor. Output is
+// emitted by the UserPromptSubmit hook as a calibrated band that the
+// formatter (cmd_pending.formatClaudeInjection) gates by source tier
+// and variance before showing it to Claude. Claude is instructed to
+// cite the band, override only on structural scope mismatch, and not
+// pad the override out of caution.
 //
-// The predictor is a BM25-weighted k-nearest-neighbors regressor over
-// the project's own past turn records. Aggregation: weighted median +
-// p25/p75 of the top-k neighbors' wall/active seconds, weighted by
-// similarity. Falls back to task-type bucket stats, then overall
-// project, then global sketch, then "unknown."
+// Architecture: a BM25-weighted k-nearest-neighbors regressor over the
+// project's own past turn records. Aggregation = weighted median plus
+// P10/P25/P75/P90 of the top-k neighbors' wall and active seconds,
+// weighted by BM25 similarity × an exponential recency factor (60-day
+// half-life by default; HINDCAST_FRESHNESS_HALFLIFE_DAYS overrides).
+// Empirical quantiles are widened via small-sample shrinkage — at n=7
+// neighbors the band widens by ~19%, asymptotically 1.0 as n→∞.
+//
+// Fallback ladder when kNN sim or sample is insufficient: task-type
+// bucket → overall project → global sketch → none. Bucket and project
+// tiers are populated; global is computed but the inject path
+// suppresses it (biased short on new projects).
+//
+// The injection-vs-status-line decision (anchoring trade-off, per Lou
+// et al. 2024) is handled at the rendering layer, not here. This
+// package is purely numeric.
 package predict
 
 import (
@@ -37,12 +49,12 @@ const (
 
 // Prediction is the local kNN forecast for a turn. All durations in seconds.
 type Prediction struct {
-	WallSeconds    int     `json:"wall_seconds"`
-	ActiveSeconds  int     `json:"active_seconds"`
-	WallP25        int     `json:"wall_p25"`
-	WallP75        int     `json:"wall_p75"`
-	ActiveP25      int     `json:"active_p25"`
-	ActiveP75      int     `json:"active_p75"`
+	WallSeconds   int `json:"wall_seconds"`
+	ActiveSeconds int `json:"active_seconds"`
+	WallP25       int `json:"wall_p25"`
+	WallP75       int `json:"wall_p75"`
+	ActiveP25     int `json:"active_p25"`
+	ActiveP75     int `json:"active_p75"`
 	// v0.6.3: wider quantiles. Used as the rendered band when the
 	// variance gate trips — a calibrated [P10, P90] captures 80% of
 	// actual durations vs 50% for [P25, P75], which matches "useful
@@ -50,16 +62,16 @@ type Prediction struct {
 	// superset of the existing distribution so there's no model to
 	// overfit. Populated by the kNN tier only; bucket / project tiers
 	// leave them zero.
-	WallP10        int     `json:"wall_p10,omitempty"`
-	WallP90        int     `json:"wall_p90,omitempty"`
-	ActiveP10      int     `json:"active_p10,omitempty"`
-	ActiveP90      int     `json:"active_p90,omitempty"`
-	N              int     `json:"n"`                       // neighbors used
-	MaxSim         float64 `json:"max_sim,omitempty"`       // top neighbor similarity (knn or regressor's bm25 feature)
-	Source         Source  `json:"source"`
-	SourceDetail   string  `json:"source_detail,omitempty"` // e.g. regressor variant ("gbdt"|"linear")
-	TaskType       string  `json:"task_type,omitempty"`
-	SessionID      string  `json:"session_id,omitempty"`
+	WallP10      int     `json:"wall_p10,omitempty"`
+	WallP90      int     `json:"wall_p90,omitempty"`
+	ActiveP10    int     `json:"active_p10,omitempty"`
+	ActiveP90    int     `json:"active_p90,omitempty"`
+	N            int     `json:"n"`                 // neighbors used
+	MaxSim       float64 `json:"max_sim,omitempty"` // top neighbor similarity (knn or regressor's bm25 feature)
+	Source       Source  `json:"source"`
+	SourceDetail string  `json:"source_detail,omitempty"` // e.g. regressor variant ("gbdt"|"linear")
+	TaskType     string  `json:"task_type,omitempty"`
+	SessionID    string  `json:"session_id,omitempty"`
 }
 
 // kNN threshold: a top neighbor below this is treated as insufficient
@@ -242,7 +254,7 @@ func weightedQuantile(ws []weighted, q float64) float64 {
 	}
 	if total <= 0 {
 		// Equal-weight fallback.
-		i := int(math.Round(q*float64(len(sorted)-1)))
+		i := int(math.Round(q * float64(len(sorted)-1)))
 		return sorted[i].value
 	}
 	target := q * total

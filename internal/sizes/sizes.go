@@ -11,7 +11,7 @@ const (
 	Large  Bucket = "large"
 )
 
-// Weights are hand-picked so the BOOTSTRAP example turns land in their
+// Weights are hand-picked so representative turn shapes land in their
 // intended buckets: (3 files, 8 tools) → medium, (11 files, 91 tools) →
 // large, (1 file, 4 tools) → small. Re-tune once real data is in.
 const (

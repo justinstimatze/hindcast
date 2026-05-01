@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	iofs "io/fs"
 	"math"
 	"math/rand"
 	"net/http"
@@ -79,14 +78,14 @@ func cmdEvalAPI(args []string) {
 }
 
 type apiSample struct {
-	Prompt        string
-	Project       string
-	ProjectHash   string
-	ActualWall    int
-	ActualActive  int
-	TaskType      string
-	SizeBucket    string
-	PriorsBlock   string
+	Prompt       string
+	Project      string
+	ProjectHash  string
+	ActualWall   int
+	ActualActive int
+	TaskType     string
+	SizeBucket   string
+	PriorsBlock  string
 }
 
 func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
@@ -101,9 +100,8 @@ func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
 	rng := rand.New(rand.NewSource(seed))
 	rng.Shuffle(len(transcripts), func(i, j int) { transcripts[i], transcripts[j] = transcripts[j], transcripts[i] })
 
-	// Cache priors per project and cap samples per project so the A/B
-	// doesn't end up dominated by one chatty codebase.
-	priorsCache := map[string]string{}
+	// Cap samples per project so the A/B doesn't end up dominated by
+	// one chatty codebase.
 	perProject := map[string]int{}
 	maxPerProject := n/4 + 1
 
@@ -147,7 +145,6 @@ func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
 			for _, c := range t.ToolCalls {
 				toolCount += c
 			}
-			_ = priorsCache // kept for future caching of non-prompt-specific priors
 			// What goes to the API as the user message: rolling-window
 			// context + current prompt, matching what the product hook
 			// feeds into Claude's attention at UserPromptSubmit time.
@@ -635,7 +632,3 @@ func truncate(s string, max int) string {
 	}
 	return s
 }
-
-// Silence unused imports on some platforms.
-var _ iofs.DirEntry
-var _ = filepath.Join

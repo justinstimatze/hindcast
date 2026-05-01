@@ -39,7 +39,7 @@ type prefRow struct {
 // read it without recomputation.
 type Health struct {
 	// Tuning result.
-	TunedSimThreshold float64 `json:"tuned_sim_threshold"` // gate sim ≥ this; ∞ = never inject
+	TunedSimThreshold  float64 `json:"tuned_sim_threshold"` // gate sim ≥ this; ∞ = never inject
 	KNNMALRAtThreshold float64 `json:"knn_malr_at_threshold"`
 	BucketMALR         float64 `json:"bucket_malr"`
 	GroupMALR          float64 `json:"group_malr"` // overall project tier
@@ -72,9 +72,9 @@ type Health struct {
 }
 
 type SimBucketStat struct {
-	LoSim   float64 `json:"lo_sim"`
-	HiSim   float64 `json:"hi_sim"`
-	N       int     `json:"n"`
+	LoSim    float64 `json:"lo_sim"`
+	HiSim    float64 `json:"hi_sim"`
+	N        int     `json:"n"`
 	WallMALR float64 `json:"wall_malr"`
 }
 
@@ -135,7 +135,7 @@ func Load() (*Health, error) {
 //  3. For the kNN tier, scan candidate thresholds [0.15, 0.20, ..., 0.95].
 //     For each, compute "kNN MALR among predictions where max_sim ≥ t".
 //     The tuned threshold is the smallest t where:
-//        knn_malr_at_t ≤ 0.85 × bucket_malr
+//     knn_malr_at_t ≤ 0.85 × bucket_malr
 //     i.e. kNN beats bucket fallback by at least 15% at this gate.
 //     If no such t exists, tuned threshold = +Inf (gate never opens).
 //

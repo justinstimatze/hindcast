@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -31,7 +30,6 @@ func parseWithUsage(name, desc string, args []string) {
 }
 
 // Silence unused import if io ever gets pulled in for help-wrapping.
-var _ = io.Discard
 
 // cmdShow dumps what hindcast has recorded. With --project P, scopes to
 // a single project; otherwise reports all projects.
@@ -630,7 +628,6 @@ func cmdForget(args []string) {
 	fmt.Fprintf(os.Stderr, "forgot project %s; global sketch rebuilt from %d remaining records\n",
 		hash, rebuilt)
 }
-
 
 // showHealth prints the persisted tuned predictor state — the result of
 // the last `hindcast tune` run. If never tuned, suggests running it.

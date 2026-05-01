@@ -1,6 +1,40 @@
 # Changelog
 
-## [0.6.4] — unreleased — small-sample shrinkage on empirical quantiles
+## Unreleased
+
+(none)
+
+## [0.6.5] — 2026-05-01 — first public release
+
+Tagged the v0.6 polish series. Empirical lift over stock Claude across
+three independent n=30 samples on `claude-sonnet-4-6`:
+
+| seed | control MALR | treatment MALR | lift | 95% CI    |
+|------|--------------|----------------|------|-----------|
+|   42 |       16.3×  |          2.5×  | 6.5× | 2.6–17.6  |
+|    7 |       10.6×  |          2.7×  | 4.0× | 1.4– 8.2  |
+| 2026 |       17.3×  |          1.7×  | 9.9× | 6.9–28.0  |
+
+All three CIs above 1.0 — treatment reduces error with statistical
+confidence on every sample. Reproduce with `hindcast eval-api`.
+
+The v0.6 series was a single-day polish run: gated injection brought
+hindcast back into Claude's context after the v0.2 anti-anchoring
+pivot, with new gates so wrong-retrieval doesn't dominate (tier gate,
+variance gate); the recording pipeline got a per-turn pending file to
+fix the rapid-fire turn drop; the accuracy log learned to measure
+band hit rate instead of point MALR; the kNN tier got freshness
+weighting and small-sample shrinkage. See per-version entries below
+for the engineering history.
+
+Pre-release hardening also landed: rune-aware tail trimming in
+`transcript.readRecentTextsBudget`, harder `looksAutomated` that
+catches automation markers anywhere in the rolling-window context
+(not just the user's first line), and the v0.6.x inject mode in
+`cmd_eval_api.go` so the A/B is actually testing what production
+ships.
+
+## [0.6.4] — 2026-04-30 — small-sample shrinkage on empirical quantiles
 
 ### Headline
 
@@ -50,7 +84,7 @@ also bump up, but it was already on path.
 - Existing `TestPredictKNNComputesWideQuantiles` still passes — relative
   ordering invariants survive the shrinkage.
 
-## [0.6.3] — unreleased — wider bands, freshness weighting, dynamic variance gate
+## [0.6.3] — 2026-04-30 — wider bands, freshness weighting, dynamic variance gate
 
 ### Headline
 
@@ -148,7 +182,7 @@ choices over the existing weighted-quantile data.
 older indexes default to zero TS, which means freshness-neutral).
 Forward-compat: pre-v0.6.3 readers ignore the new fields.
 
-## [0.6.2] — unreleased — pending-per-turn (fix rapid-fire turn drops)
+## [0.6.2] — 2026-04-30 — pending-per-turn (fix rapid-fire turn drops)
 
 ### Headline
 
@@ -201,7 +235,7 @@ patterns, so no in-flight data is lost across upgrade.
 - `TestListPendingForSessionPicksUpLegacy` — glob captures both pre-
   v0.6.2 and v0.6.2 pending file shapes.
 
-## [0.6.1] — unreleased — accuracy log captures band; band-hit-rate metric
+## [0.6.1] — 2026-04-30 — accuracy log captures band; band-hit-rate metric
 
 ### Headline
 
@@ -268,7 +302,7 @@ production entry surfaced a global-source row with `variance_gated=true`.
   cases (inclusive bracket), point-vs-variance-gated split, all from
   inject-eligible source tiers.
 
-## [0.6.0] — unreleased — gated context injection + Stop-hook fallback + status line removed
+## [0.6.0] — 2026-04-30 — gated context injection + Stop-hook fallback + status line removed
 
 ### Headline
 
@@ -358,7 +392,7 @@ just `go install`). The first install merges the legacy statusLine
 cleanup into settings.json. Without it, Claude Code's status bar
 displays "unknown command: statusline" on every prompt.
 
-## [0.5.0] — unreleased — per-user adaptive tier selection + feature-leak fix
+## [0.5.0] — 2026-04-26 — per-user adaptive tier selection + feature-leak fix
 
 ### Headline
 
@@ -445,7 +479,7 @@ distribution is heterogeneous and the model was free-riding on it.
 
 ---
 
-## [0.4.0] — unreleased — universal-features regressor (offline tooling)
+## [0.4.0] — 2026-04-26 — universal-features regressor (offline tooling)
 
 ### The investigation
 
@@ -515,7 +549,7 @@ displacing kNN as the primary predictor on user data is not there.
   `predict.Predict` consult health.json to pick the locally-winning tier.
   Makes the regressor opt-in by data, not by config.
 
-## [0.3.1] — unreleased — auto-tuned per-user sim threshold
+## [0.3.1] — 2026-04-25 — auto-tuned per-user sim threshold
 
 Cross-corpus benchmark in v0.3.0 showed the global `sim ≥ 0.5` cliff
 doesn't generalize. v0.3.1 ships per-user tuning: each install computes
@@ -546,7 +580,7 @@ automatically from the Stop hook when stale.
   conditions). Future iteration may add an opt-in toggle once the tuned
   values prove stable across users in the wild.
 
-## [0.3.0] — unreleased — cross-corpus benchmark + honest reframe
+## [0.3.0] — 2026-04-25 — cross-corpus benchmark + honest reframe
 
 ### The investigation
 
@@ -608,7 +642,7 @@ OpenHands SWE-bench Lite (~1.2k Claude trajectories with real prompts).
 - `cmd/diag/` — was a one-off diagnostic for tuning the local sim threshold.
   Superseded by `bench-cross`.
 
-## [0.2.0] — unreleased — pivot from context-injection to human-facing predictor
+## [0.2.0] — 2026-04-23 — pivot from context-injection to human-facing predictor
 
 ### The pivot
 An adversarial review + literature survey during development flagged two

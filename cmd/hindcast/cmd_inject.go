@@ -40,6 +40,7 @@ func cmdInject() {
 
 	// Opportunistic TTL sweep of orphaned pending files.
 	_ = store.SweepPending(6 * time.Hour)
+	_ = store.SweepSessionMomentum(24 * time.Hour)
 
 	// Default post-v0.2: no SessionStart injection. Anchoring priors in
 	// Claude's context was the v0.1 mechanism; we've pivoted to a local
@@ -219,9 +220,9 @@ func aggregate(records []store.Record) (wallMed, wallP75, wallP90, activeMed, ac
 }
 
 type bucketRow struct {
-	Label                string
-	N                    int
-	WallMed, WallP75, WallP90     float64
+	Label                           string
+	N                               int
+	WallMed, WallP75, WallP90       float64
 	ActiveMed, ActiveP75, ActiveP90 float64
 }
 

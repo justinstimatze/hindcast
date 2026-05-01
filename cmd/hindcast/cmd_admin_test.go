@@ -12,15 +12,15 @@ import (
 //     never saw, which is incoherent.
 func TestWithBandRows(t *testing.T) {
 	rows := []accuracyRow{
-		{Source: "knn", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90},      // included
-		{Source: "bucket", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90},   // included
-		{Source: "project", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90},  // included
-		{Source: "regressor", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90}, // included
-		{Source: "global", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90},   // EXCLUDED — global never injects
-		{Source: "none", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90},     // EXCLUDED
-		{Source: "knn", ActualWall: 60, PredictedWallP25: 0, PredictedWallP75: 90},       // EXCLUDED — pre-v0.6.1
-		{Source: "knn", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 0},       // EXCLUDED — pre-v0.6.1
-		{Source: "knn", ActualWall: 0, PredictedWallP25: 30, PredictedWallP75: 90},       // EXCLUDED — no actual
+		{Source: "knn", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90},                      // included
+		{Source: "bucket", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90},                   // included
+		{Source: "project", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90},                  // included
+		{Source: "regressor", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90},                // included
+		{Source: "global", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90},                   // EXCLUDED — global never injects
+		{Source: "none", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90},                     // EXCLUDED
+		{Source: "knn", ActualWall: 60, PredictedWallP25: 0, PredictedWallP75: 90},                       // EXCLUDED — pre-v0.6.1
+		{Source: "knn", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 0},                       // EXCLUDED — pre-v0.6.1
+		{Source: "knn", ActualWall: 0, PredictedWallP25: 30, PredictedWallP75: 90},                       // EXCLUDED — no actual
 		{Source: "knn", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90, VarianceGated: true}, // included
 	}
 	got := withBandRows(rows)
@@ -41,11 +41,11 @@ func TestWithBandRows(t *testing.T) {
 func TestBandHitRateComputation(t *testing.T) {
 	rows := []accuracyRow{
 		// Point-rendered (variance_gated=false): 2/3 hit
-		{Source: "knn", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90}, // hit (60 in [30,90])
-		{Source: "knn", ActualWall: 30, PredictedWallP25: 30, PredictedWallP75: 90}, // hit (boundary inclusive)
+		{Source: "knn", ActualWall: 60, PredictedWallP25: 30, PredictedWallP75: 90},  // hit (60 in [30,90])
+		{Source: "knn", ActualWall: 30, PredictedWallP25: 30, PredictedWallP75: 90},  // hit (boundary inclusive)
 		{Source: "knn", ActualWall: 200, PredictedWallP25: 30, PredictedWallP75: 90}, // miss (above)
 		// Variance-gated: 1/2 hit
-		{Source: "knn", ActualWall: 5, PredictedWallP25: 1, PredictedWallP75: 10, VarianceGated: true},   // hit
+		{Source: "knn", ActualWall: 5, PredictedWallP25: 1, PredictedWallP75: 10, VarianceGated: true},      // hit
 		{Source: "knn", ActualWall: 1000, PredictedWallP25: 60, PredictedWallP75: 600, VarianceGated: true}, // miss
 	}
 	band := withBandRows(rows)

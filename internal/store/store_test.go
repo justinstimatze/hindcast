@@ -10,8 +10,13 @@ import (
 )
 
 func TestProjectHashStable(t *testing.T) {
-	if ProjectHash("hindcast") != ProjectHash("hindcast") {
-		t.Error("hash not stable")
+	// Stability across the binary's lifetime: the hash is the on-disk
+	// directory key for a project; if the formula drifts every install
+	// loses access to its own historical records. Pin to a literal so a
+	// silent change to the hash function or truncation length fails the
+	// test rather than passing a tautological self-comparison.
+	if got := ProjectHash("hindcast"); got != "1283c759" {
+		t.Errorf("ProjectHash(\"hindcast\") = %q; want 1283c759 (stability lock)", got)
 	}
 	if len(ProjectHash("hindcast")) != 8 {
 		t.Error("hash length != 8")

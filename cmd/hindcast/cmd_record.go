@@ -127,6 +127,7 @@ func doRecord(in recordInput) {
 	}
 
 	_ = store.SweepPending(6 * time.Hour)
+	_ = store.SweepSessionMomentum(24 * time.Hour)
 
 	// v0.6.2: Stop fires once per completed turn. Find the latest
 	// completed turn in the transcript, then match it to the pending
@@ -260,14 +261,20 @@ func doRecord(in recordInput) {
 	}
 
 	// After appending, check whether the log rotated and if so, rebuild
-	// the BM25 index from the records still in the active log so index
-	// and log stay in sync.
-	if err := rotateBM25IfNeeded(logPath, pend.ProjectHash); err != nil {
+	// the BM25 index from the records still in the active log (which
+	// includes the just-appended record) so index and log stay in sync.
+	// When rotation rebuilt, the just-appended record is already in the
+	// index — skip the subsequent updateBM25 call to avoid double-
+	// counting the turn.
+	rotated, err := rotateBM25IfNeeded(logPath, pend.ProjectHash)
+	if err != nil {
 		hook.Logf("record", "bm25 rotate: %s", err)
 	}
 
-	if err := updateBM25(pend.ProjectHash, pend.PromptTokens, r, toolCount); err != nil {
-		hook.Logf("record", "bm25 update: %s", err)
+	if !rotated {
+		if err := updateBM25(pend.ProjectHash, pend.PromptTokens, r, toolCount); err != nil {
+			hook.Logf("record", "bm25 update: %s", err)
+		}
 	}
 	if err := updateSketch(r); err != nil {
 		hook.Logf("record", "sketch update: %s", err)
@@ -393,9 +400,15 @@ func updateBM25(hash string, promptHashes []uint64, r store.Record, toolCount in
 	if err != nil {
 		return err
 	}
+	// Auto-heal corrupt indexes: if Load returns a decode error (e.g. a
+	// crash mid-write left a partial gob, or the schema bumped past
+	// what's persisted), start fresh. Without this the index never
+	// recovers — every subsequent updateBM25 returns the same decode
+	// error and the kNN tier silently goes dark for that project.
 	idx, err := bm25.Load(path)
 	if err != nil {
-		return err
+		hook.Logf("record", "bm25 load %s failed (%s); starting fresh index", path, err)
+		idx = bm25.New()
 	}
 	idx.Add(promptHashes, bm25.Doc{
 		ActiveSeconds: r.ClaudeActiveSeconds,
@@ -415,12 +428,17 @@ func updateBM25(hash string, promptHashes []uint64, r store.Record, toolCount in
 // new sketch, losing one sample.
 // rotateBM25IfNeeded checks if the active log was just rotated out (file
 // size back to near-zero after AppendRecord) and if so, rebuilds the
-// BM25 index from the (now trimmed) record set. Cheap fast-path when no
-// rotation happened: just returns.
-func rotateBM25IfNeeded(logPath, hash string) error {
+// BM25 index from the (now trimmed) record set, which already includes
+// the just-appended record. Returns (true, nil) when a rebuild
+// happened — the caller should NOT then call updateBM25 with the same
+// record, or the index would double-count it.
+//
+// Returns (false, nil) on the cheap fast-path (no rotation detected,
+// no rebuild needed).
+func rotateBM25IfNeeded(logPath, hash string) (bool, error) {
 	stat, err := os.Stat(logPath)
 	if err != nil {
-		return nil
+		return false, nil
 	}
 	// Rotation happened if the rotated segment (.1) exists AND is
 	// younger than the active log's modification time. Heuristic: if
@@ -428,25 +446,25 @@ func rotateBM25IfNeeded(logPath, hash string) error {
 	rotatedPath := logPath + ".1"
 	rotStat, err := os.Stat(rotatedPath)
 	if err != nil || rotStat.Size() < store.LogRotateSize {
-		return nil
+		return false, nil
 	}
 	if stat.Size() > store.MaxRecordSize*2 {
-		return nil // active log not freshly rotated
+		return false, nil // active log not freshly rotated
 	}
 	// Rebuild BM25 from current active log's records.
 	records, err := store.ReadRecentRecords(logPath, 500)
 	if err != nil {
-		return err
+		return false, err
 	}
 	bm25Path, err := store.ProjectBM25Path(hash)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// Check if rebuild is actually warranted: compare index's doc count
 	// to active log's record count. Only rebuild on significant drift.
 	idx, _ := bm25.Load(bm25Path)
 	if idx != nil && len(idx.Docs) <= len(records)*2 {
-		return nil
+		return false, nil
 	}
 	fresh := bm25.New()
 	for _, r := range records {
@@ -467,7 +485,10 @@ func rotateBM25IfNeeded(logPath, hash string) error {
 			TS:            r.TS,
 		})
 	}
-	return fresh.Save(bm25Path)
+	if err := fresh.Save(bm25Path); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func updateSketch(r store.Record) error {
@@ -549,6 +570,7 @@ func doRecordFallback(in recordInput) {
 	}
 
 	_ = store.SweepPending(6 * time.Hour)
+	_ = store.SweepSessionMomentum(24 * time.Hour)
 
 	project := store.ResolveProject(in.CWD)
 	hash := store.ProjectHash(project)
@@ -653,11 +675,14 @@ func doRecordFallback(in recordInput) {
 		return
 	}
 
-	if err := rotateBM25IfNeeded(logPath, hash); err != nil {
+	rotated, err := rotateBM25IfNeeded(logPath, hash)
+	if err != nil {
 		hook.Logf("record", "fallback bm25 rotate: %s", err)
 	}
-	if err := updateBM25(hash, promptTokens, r, toolCount); err != nil {
-		hook.Logf("record", "fallback bm25 update: %s", err)
+	if !rotated {
+		if err := updateBM25(hash, promptTokens, r, toolCount); err != nil {
+			hook.Logf("record", "fallback bm25 update: %s", err)
+		}
 	}
 	if err := updateSketch(r); err != nil {
 		hook.Logf("record", "fallback sketch update: %s", err)

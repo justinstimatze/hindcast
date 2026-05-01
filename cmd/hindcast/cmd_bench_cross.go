@@ -26,13 +26,13 @@ import (
 // chronologically. For each run after warmup, four predictors compete:
 //
 //   - global_median:   median of ALL prior Claude runs across all groups
-//                      (the dumbest possible baseline)
+//     (the dumbest possible baseline)
 //   - group_median:    median of prior runs in the same (model, family)
-//                      (the bucket/project tier)
+//     (the bucket/project tier)
 //   - task_id_median:  median of prior runs with the same task_id
-//                      (the within-task baseline)
+//     (the within-task baseline)
 //   - knn_taskid:      BM25-weighted kNN over task_id tokens
-//                      (the closest analog to hindcast's kNN tier)
+//     (the closest analog to hindcast's kNN tier)
 //
 // MALR per predictor tells us whether each tier earns its keep on
 // cross-corpus data. Lift over the dumb baseline is the question.

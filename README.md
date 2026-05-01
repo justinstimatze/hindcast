@@ -175,6 +175,7 @@ hindcast is zero-config on the value path. These env vars exist for edge cases:
 | `HINDCAST_CONTROL_PCT` | 10 | percentage of sessions in A/B control arm (only relevant under legacy inject) |
 | `HINDCAST_INJECT` | unset (on) | set to `0` to suppress hook output to Claude (predictor still records turns) |
 | `HINDCAST_LEGACY_INJECT` | unset | re-enable the v0.1 ungated full-bucket-table injection (mostly for A/B research) |
+| `HINDCAST_FRESHNESS_HALFLIFE_DAYS` | `60` | half-life (days) for kNN recency weighting; `0` or negative disables and treats every record as freshness-neutral |
 
 `.hindcast-project` in your project root overrides the default project name (useful for monorepos and symlinked trees).
 

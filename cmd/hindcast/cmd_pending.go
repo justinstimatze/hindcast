@@ -240,36 +240,6 @@ func formatClaudeInjection(p predict.Prediction) string {
 	return b.String()
 }
 
-// deliverBM25 prints one line of retrieval context for CC to inject.
-// Shows only stats of the closest past match — no prompt text, since
-// that's what the privacy-first design guarantees.
-func deliverBM25(queryHashes []uint64, hash string) {
-	if len(queryHashes) == 0 {
-		return
-	}
-	bm25Path, err := store.ProjectBM25Path(hash)
-	if err != nil {
-		return
-	}
-	idx, err := bm25.Load(bm25Path)
-	if err != nil || idx == nil || len(idx.Docs) == 0 {
-		return
-	}
-	matches := idx.TopK(queryHashes, 1)
-	if len(matches) == 0 || matches[0].Sim < 0.10 {
-		return
-	}
-	m := matches[0]
-	activeMin := float64(m.Doc.ActiveSeconds) / 60.0
-	wallMin := float64(m.Doc.WallSeconds) / 60.0
-	bucket := m.Doc.TaskType
-	if m.Doc.SizeBucket != "" {
-		bucket = fmt.Sprintf("%s-%s", m.Doc.TaskType, m.Doc.SizeBucket)
-	}
-	fmt.Printf("Closest past turn (BM25 sim=%.2f): %s, %d tools, %d files — active %.1fm / wall %.1fm\n",
-		m.Sim, bucket, m.Doc.ToolCount, m.Doc.FilesTouched, activeMin, wallMin)
-}
-
 // computePrediction returns a Prediction for the current turn. The tier
 // order is health-driven: if `hindcast tune` measured a learned regressor
 // to beat the ladder by ≥15% on this user's 50/50 held-out split, the

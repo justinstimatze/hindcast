@@ -1,6 +1,6 @@
 // Package tags classifies a prompt's first line into a task-type bucket
 // via deterministic keyword regex. Pure, no dependencies, table-driven.
-// See BOOTSTRAP.md "Approach" for the full taxonomy.
+// Buckets: bug, feature, refactor, test, docs, other.
 package tags
 
 import (

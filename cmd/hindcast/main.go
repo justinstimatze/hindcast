@@ -14,7 +14,7 @@ import (
 	"github.com/justinstimatze/hindcast/internal/hook"
 )
 
-const version = "0.6.4-dev"
+const version = "0.6.5"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -106,7 +106,6 @@ Hooks (invoked by Claude Code; not for manual use):
   hindcast inject                SessionStart — inject session-scoped priors.
   hindcast mcp                   MCP stdio server — exposes hindcast_prior tool.
 
-See BOOTSTRAP.md for the full design spec.
+See README.md for usage and CHANGELOG.md for release notes.
 `)
 }
-
