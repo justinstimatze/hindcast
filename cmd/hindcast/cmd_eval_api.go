@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/justinstimatze/hindcast/internal/bm25"
 	"github.com/justinstimatze/hindcast/internal/seed"
@@ -155,6 +156,15 @@ func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
 			// user's request, silently degrading task-type selection for
 			// every post-rolling-window turn.
 			effectivePrompt := transcript.ComposeEffectiveTask(t.PromptText, path)
+			// Re-run the automation check on the COMPOSED effective
+			// prompt: the rolling-window context can drag in scheduler
+			// bullets, status markers, or broken UTF-8 even when the
+			// raw user message was clean. Filtering at compose time
+			// keeps the eval inputs comparable to what a human would
+			// recognize as a real session prompt.
+			if looksAutomated(effectivePrompt) {
+				continue
+			}
 			var pb string
 			switch currentInjectMode {
 			case "legacy":
@@ -179,42 +189,60 @@ func pickAPISamples(n int, seed int64, maxChars int) []apiSample {
 	return out
 }
 
-// looksAutomated flags prompts that look templated / non-interactive.
-// Round-4 panel found the initial filter missed `<task-notification>`,
-// shell paste lines, marker phrases, and too-short prompts. Widened.
+// looksAutomated flags prompts that look templated / non-interactive
+// or otherwise unfit for the eval. Two passes:
+//
+//  1. First line: strong shape signals (XML/bracket prefixes, shell
+//     pastes, scheduler bullets, status markers).
+//  2. Whole string: weaker signals that catch contamination — broken
+//     UTF-8 (non-printable leading bytes from a sliced multi-byte
+//     char) and automation markers appearing anywhere, since the
+//     eval feeds the rolling-window-effective prompt to the API and
+//     a clean human first turn can be polluted by automation in the
+//     surrounding context.
 func looksAutomated(s string) bool {
 	trimmed := strings.TrimSpace(s)
 	if len(trimmed) < 10 {
 		return true
 	}
-	// First line is the strongest signal for automation shape.
+	// Leading non-printable bytes mean the trim ate a UTF-8 fragment
+	// (continuation byte 0x80-0xBF, or a control char). Either way the
+	// prompt is corrupted and shouldn't be sent to the API.
+	if r, _ := utf8.DecodeRuneInString(trimmed); r == utf8.RuneError {
+		return true
+	}
+	first := trimmed[0]
+	if first < 0x20 || (first >= 0x80 && first < 0xC0) {
+		// non-printable ASCII or UTF-8 continuation byte at the start
+		return true
+	}
+	// First line shape checks.
 	firstLine := trimmed
 	if i := strings.IndexByte(trimmed, '\n'); i > 0 {
 		firstLine = trimmed[:i]
 	}
-	// XML/HTML-like tag prefix: <task-notification>, <system-reminder>, etc.
 	if strings.HasPrefix(firstLine, "<") && strings.Contains(firstLine, ">") {
 		return true
 	}
-	// Bracket-prefix automation ("[GAS TOWN] boot <- daemon • ...").
 	if strings.HasPrefix(firstLine, "[") && strings.Contains(firstLine, "] ") {
 		return true
 	}
-	// Bullet-date pattern (schedulers that log "• 2026-04-19T03:26").
 	if strings.Contains(firstLine, "•") && strings.Contains(firstLine, "T") {
 		return true
 	}
-	// Shell-command paste.
 	if strings.HasPrefix(firstLine, "$ ") || strings.HasPrefix(firstLine, "sudo ") {
 		return true
 	}
-	// Marker phrases — automation sends these as status updates.
+	// Whole-string marker scan: catches automation in the rolling-
+	// window context that prefixes the actual user message in the
+	// eval's effective prompt.
 	for _, m := range []string{
 		"_DONE ", "_READY ", "_COMPLETE ", "_COMPLETED",
 		"Polecat dispatched", "QUEUED NUDGE", "MERGE_READY",
 		"Boot triage:", "Formula mol-",
+		"[GAS TOWN]", "[POLECAT]", "[BUDDY]",
 	} {
-		if strings.Contains(firstLine, m) {
+		if strings.Contains(trimmed, m) {
 			return true
 		}
 	}

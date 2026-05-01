@@ -52,18 +52,19 @@ The size of the calibration lift is use-case-dependent and is not currently quan
 
 ## Empirical lift
 
-A/B against the Claude API on n=30 historical prompts from real sessions, claude-sonnet-4-6, control vs hindcast-v0.6 inject:
+A/B against the Claude API on real-session historical prompts, claude-sonnet-4-6, control (stock) vs hindcast-v0.6 inject. Three independent n=30 samples (different seeds):
 
-| arm           | n  | MALR   | p90    | bias   |
-|---------------|----|--------|--------|--------|
-| stock claude  | 30 | 16.7×  | 105.9× | 16.7×  |
-| with hindcast | 30 |  2.2×  |  15.1× |  1.5×  |
+| seed | control MALR | treatment MALR | lift | 95% CI    |
+|------|--------------|----------------|------|-----------|
+|   42 |       16.3×  |          2.5×  | 6.5× | 2.6–17.6  |
+|    7 |       10.6×  |          2.7×  | 4.0× | 1.4–8.2   |
+| 2026 |       17.3×  |          1.7×  | 9.9× | 6.9–28.0  |
 
-**Lift = 7.53× (95% CI 3.0–11.7)** — treatment reduces error with statistical confidence (CI does not cross 1.0).
+**Stock Claude over-estimates by 10–17× median; with hindcast, median error drops to 1.7–2.7×. Lift = 4–10× across seeds (median ≈6.5×). All three CIs are above 1.0 — treatment reduces error with statistical confidence on every sample.**
 
-Stock Claude over-estimates by 16× median on agent-shaped prompts (a 60-second task gets an "18000-second" answer in some cases). Hindcast brings the median down to 2× of truth, with a slight over-estimation bias (1.5×) — much better than the stock 16.7×, slightly under-confident as a deliberate tradeoff (anchoring less than the maintainer's intuition).
+Stock's worst outliers run wild — a 9-second task can get an "18000-second" answer because training-data priors are calibrated to human engineers, not agents. Hindcast clamps the central tendency to ~2× of truth with mild over-estimate bias (1.3–1.6×) — much better than stock, deliberately under-confident relative to maintainer intuition (anchoring caution).
 
-Reproduce with `hindcast eval-api -n 30`. Requires `ANTHROPIC_API_KEY`. Costs <$1 in API tokens. Compare modes with `-inject legacy` (v0.1 bucket-table) vs `-inject v06` (default; v0.6.x gated band).
+Reproduce with `hindcast eval-api -n 30 -seed 42`. Requires `ANTHROPIC_API_KEY`. Costs <$1 in API tokens per run. Compare modes with `-inject legacy` (v0.1 bucket-table) vs `-inject v06` (default; v0.6.x gated band).
 
 ## The predictor
 
