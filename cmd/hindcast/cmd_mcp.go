@@ -16,9 +16,14 @@ import (
 )
 
 // MCP stdio server. Speaks JSON-RPC 2.0 on newline-delimited stdio per
-// the Model Context Protocol spec. Exposes one tool — hindcast_prior —
-// which takes a candidate prompt and returns duration priors (bucket
-// stats + BM25 top match). Intended for plan-mode per-step estimation.
+// the Model Context Protocol spec. Exposes two tools:
+//   - hindcast_prior     — takes a candidate prompt; returns duration
+//                          priors (bucket stats + BM25 top match).
+//                          Used inside plans for per-step estimation.
+//   - hindcast_estimate  — captures Claude's own committed estimate
+//                          for the current turn so the Stop hook can
+//                          fold it into the accuracy log alongside
+//                          predicted vs actual.
 
 type mcpRequest struct {
 	JSONRPC string          `json:"jsonrpc"`

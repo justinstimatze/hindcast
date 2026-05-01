@@ -83,6 +83,7 @@ func recordParent() {
 	cmd.Stderr = nil
 	cmd.SysProcAttr = detachAttrs()
 	if err := cmd.Start(); err != nil {
+		hook.Logf("record", "spawn worker: %s", err)
 		os.Remove(tmpPath)
 		return
 	}
@@ -687,6 +688,11 @@ func cmdAutoTuneWorker() {
 		return
 	}
 	if len(byProject) == 0 {
+		// Cold start: nothing to compute, but we must bump health.json's
+		// modtime regardless or shouldRetune() keeps spawning a new
+		// subprocess on every Stop. Save an empty-but-valid Health so
+		// the staleness check has something to compare against.
+		_ = (&health.Health{Verdict: "no records yet"}).Save()
 		return
 	}
 	sk, _ := store.LoadSketch()

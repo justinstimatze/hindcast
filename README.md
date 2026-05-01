@@ -1,5 +1,9 @@
 # hindcast
 
+[![CI](https://github.com/justinstimatze/hindcast/actions/workflows/ci.yml/badge.svg)](https://github.com/justinstimatze/hindcast/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/justinstimatze/hindcast)](https://goreportcard.com/report/github.com/justinstimatze/hindcast)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 > *"I departed London on the 2nd of October at 8:45 PM and returned on the 21st of December at 8:50 PM. Not 8:49. Not 8:51. I keep meticulous logs. You estimated an hour; it took four minutes. I find this — adjusts pocket watch — correctable."*
 > — Phileas Fogg, allegedly
 
@@ -46,9 +50,9 @@ Claude: ~3m wall (P25–P75: 1m–6m, knn n=5).
 — actual: 4 minutes 12 seconds —
 ```
 
-Without the prior, Claude's first-shot estimate tends to inflate — typical case is half-hour-to-hour ranges for work that finishes in single-digit minutes. With the prior, Claude cites the predicted number and lands inside the band. Fogg, *checking his pocket watch*: "Three minutes. Four minutes twelve. Satisfactory."
+Without the prior, Claude's first-shot estimate tends to inflate — typical case is half-hour-to-hour ranges for work that finishes in single-digit minutes. With the prior, Claude cites the predicted number and lands inside the band.
 
-The size of the calibration lift is use-case-dependent and is not currently quantified by an A/B run against this exact injection format. The mechanism (anchoring) is documented in [Lou et al. 2024]; the gates above bound the failure case but do not eliminate it.
+The mechanism (anchoring) is documented in [Lou et al. 2024]; the gates above bound the failure case but do not eliminate it. The size of the calibration lift on actual production turns is reported in the next section.
 
 ## Empirical lift
 
@@ -104,7 +108,7 @@ Exit code 0 on PASS, 1 on FAIL, 2 on UNDETERMINED (not enough data). Lift thresh
 
 ```
 $ hindcast show --accuracy
-hindcast predictor accuracy: 142 turns across 3 project(s)
+hindcast predictor accuracy: 142 turns across 3 project(s) (140 usable for wall MALR)
 
 overall MALR: wall 1.84x   active 2.10x
 
@@ -114,9 +118,9 @@ bucket         41      2.10x         2.41x       1.06x
 project        13      2.97x         3.15x       1.11x
 global          5      4.20x         4.66x       1.40x
 
-band hit rate (actual ∈ [P25, P75]): 47/83  (57%)
-  point-rendered:    32/52  (62%)  ← inject showed a point; band is the implied confidence interval
-  variance-gated:    15/31  (48%)  ← inject showed only the band; this is the metric that matches what Claude saw
+band hit rate (actual ∈ rendered band): 47/83  (57%)
+  point-rendered  [P25, P75]:  32/52  (62%)  ← inject showed a point; band is the implied 50% interval (target ≈50%)
+  variance-gated  [P10, P90]:  15/31  (48%)  ← inject showed only the band (target ≈80% if P10/P90, ≈50% if P25/P75)
 ```
 
 **Two metrics, two questions:**
@@ -171,7 +175,7 @@ hindcast is zero-config on the value path. These env vars exist for edge cases:
 
 | var | default | effect |
 |---|---|---|
-| `HINDCAST_SKIP` | unset | skip recording for this session entirely |
+| `HINDCAST_SKIP` | unset | skip both recording and injection for this session entirely (UserPromptSubmit short-circuits before either) |
 | `HINDCAST_CONTROL_PCT` | 10 | percentage of sessions in A/B control arm (only relevant under legacy inject) |
 | `HINDCAST_INJECT` | unset (on) | set to `0` to suppress hook output to Claude (predictor still records turns) |
 | `HINDCAST_LEGACY_INJECT` | unset | re-enable the v0.1 ungated full-bucket-table injection (mostly for A/B research) |
@@ -201,7 +205,7 @@ The regressor is the v0.4 universal-features design (prompt length, task type, r
 ## Known limitations
 
 - **Windows is build-only** — hooks use `syscall.Setsid` and `/tmp` conventions that are Linux/macOS only. CI verifies the binary compiles on Windows; `install` refuses to run there.
-- **Anchoring is not eliminated, only bounded.** The variance and tier gates suppress the worst wrong-retrieval cases, but a confidently-wrong kNN match (sim above the predictor's `knnMinSim = 0.15` floor) with a tight band still anchors. `hindcast tune` measures a per-user empirical sim cliff and persists it to `health.json` for diagnostic surfacing in `hindcast show --accuracy`; v0.6.5 does not yet wire that tuned value back into `predict.Predict` as a hard gate. The variance gate is the per-prediction backstop. If you find Claude consistently parroting bad numbers, set `HINDCAST_INJECT=0` per-shell or open an issue with the bad-prediction example.
+- **Anchoring is not eliminated, only bounded.** The variance and tier gates suppress the worst wrong-retrieval cases, but a confidently-wrong kNN match above the active sim floor with a tight band still anchors. `hindcast tune` measures a per-user empirical sim cliff and persists it to `health.json`; v0.6.6+ wires that tuned threshold into `predict.Predict` as the per-user kNN admission floor (defaulting to `knnMinSim = 0.15` when health is unset). When the verdict is "never inject," kNN is suppressed entirely and the prediction falls through to bucket / project / global tiers. The variance gate is the additional per-prediction backstop. If you find Claude consistently parroting bad numbers, set `HINDCAST_INJECT=0` per-shell or open an issue with the bad-prediction example.
 - **NFS home directories** break the O_APPEND atomicity guarantee per-project JSONL writes rely on.
 - **BM25 stopwords are English-only.** Non-English prompts get less filtering → slightly noisier index, slightly weaker kNN retrieval.
 - **BM25 over salt-hashed tokens loses synonym signal.** "fix" and "repair" hash differently. Privacy/retrieval tradeoff is real and bounded.

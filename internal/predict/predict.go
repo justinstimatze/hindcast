@@ -131,9 +131,17 @@ func recencyWeight(docTS time.Time, now time.Time) float64 {
 // from health.json so per-user empirical cliffs gate kNN injection;
 // measurement callers (verify, health.Compute) pass 0 to use the
 // stable default and keep MALR comparisons consistent across runs.
+//
+// `+Inf` means the user's tune verdict is "never inject" (kNN
+// doesn't beat bucket on their data). The kNN tier still computes
+// and the floor is set to +Inf so no neighbor passes — the prediction
+// falls through to bucket/project/global tiers, which is what the
+// user's tune calibration says it should do.
 func Predict(queryHashes []uint64, idx *bm25.Index, records []store.Record, sk *store.Sketch, taskType string, minSim float64) Prediction {
 	floor := knnMinSim
-	if minSim > 0 && !math.IsInf(minSim, 1) {
+	if math.IsInf(minSim, 1) {
+		floor = math.Inf(1)
+	} else if minSim > 0 {
 		floor = minSim
 	}
 	// --- kNN ---

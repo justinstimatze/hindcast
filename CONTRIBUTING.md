@@ -5,7 +5,7 @@ hindcast is a small personal project maintained by [@justinstimatze](https://git
 ## Ground rules
 
 - **Go stdlib only.** No third-party dependencies. If you think we need one, open an issue first.
-- **No network calls, ever.** `net/http` must never appear in `go.mod`'s transitive deps. Privacy by construction is load-bearing.
+- **No network calls in hook or predictor paths.** The `cmd_eval_api.go` subcommand uses `net/http` to call the Anthropic API for offline A/B benchmarks; it runs only when invoked manually with `ANTHROPIC_API_KEY`. Hooks (`pending`, `record`, `inject`, `mcp`) and the predictor must never make network calls. Privacy by construction is load-bearing.
 - **No LLM calls in any hook path.** Hooks are fast and deterministic.
 - **`defer recover()` on every hook entry.** A panic in hindcast must never break a Claude Code turn.
 - **Privacy invariant: no prompt text on disk.** All on-disk fields are numeric, deterministic labels, or salt-hashed. Adding plaintext prompt storage needs a separate discussion.

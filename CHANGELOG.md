@@ -4,6 +4,85 @@
 
 (none)
 
+## [0.6.7] — 2026-05-01 — round-3 audit cleanup
+
+Closes the round-3 pre-public audit findings.
+
+### Real bugs
+
+- **`+Inf` tuned threshold did not actually suppress kNN.** v0.6.6
+  passed the per-user `health.TunedSimThreshold` through, but
+  `predict.Predict` skipped the override when the value was `+Inf`
+  (the "never inject" verdict from `hindcast tune`), so kNN
+  continued to fire at the default 0.15 floor for users whose
+  cliff measurement said it shouldn't. v0.6.7 routes `+Inf` to a
+  `+Inf` floor so no neighbor passes — the prediction falls
+  through to bucket / project / global tiers as the user's tune
+  calibration intended.
+- **`health.Save()` raced on a fixed `.tmp` filename.** Two
+  overlapping `_autotune-worker` subprocesses (v0.6.6 architecture
+  allows this — there's no autotune lock) could both write the
+  same `path + ".tmp"`; one's rename ENOENT-failed because the
+  other's rename already moved the file. Fixed by switching to
+  `os.CreateTemp(dir, ".health-*.json")` — same pattern the
+  sketch / regressor / BM25 saves use.
+- **Cold-start tight loop.** When `health.json` was missing
+  (fresh install), `shouldRetune()` returned true on every Stop;
+  `cmdAutoTuneWorker` exited silently on empty data without
+  saving anything, modtime stayed missing, next Stop spawned
+  another worker. Fixed by saving an empty `Health{Verdict: "no
+  records yet"}` on the cold-start branch so the staleness check
+  has a modtime to compare against.
+- **`recordParent` swallowed `cmd.Start()` failure silently.**
+  If exec.Start failed (binary moved, ENOENT during atomic
+  upgrade replace), the temp file was removed and the function
+  returned with no log line. Added `hook.Logf("record", "spawn
+  worker: %s", err)` for diagnostic visibility.
+
+### CI
+
+- **`golangci-lint-action@v6` with `version: v1.61` was
+  incompatible with `.golangci.yml`'s `version: "2"` schema.**
+  CI lint job would have failed on the next run. Bumped action
+  to `@v8` with `version: latest` to match the maintainer's
+  other Go repos.
+
+### Documentation accuracy
+
+- **README.md known-limitations claimed v0.6.5 hadn't wired the
+  tuned threshold** — but v0.6.6 had. Rewritten to describe the
+  current state: tuned threshold is the per-user kNN admission
+  floor when health is set; `knnMinSim = 0.15` is the default
+  floor when it isn't; "never inject" verdict suppresses kNN.
+- **`cmd_pending.go formatClaudeInjection` comment** carried the
+  same v0.6.5-era stale claim. Rewritten.
+- **`cmd_mcp.go` package doc said "Exposes one tool"** but the
+  server has shipped both `hindcast_prior` and `hindcast_estimate`
+  for several versions. Updated to list both.
+- **README `show --accuracy` example output drift.** Real format
+  uses `band hit rate (actual ∈ rendered band):` plus per-row
+  `[P25, P75]` / `[P10, P90]` labels and target-rate parentheticals.
+  README's example was the v0.6.1-era format. Updated.
+- **`WHAT_DIDNT_WORK.md` dates.** v0.5 range said
+  "2026-04-23 – 2026-04-29"; git log shows v0.5 commits on
+  2026-04-26. v0.6.5 sync auto-tune attempt dated 2026-04-30;
+  actually landed 2026-05-01. Both corrected.
+
+### Polish
+
+- **Demo's mid-block "Fogg checking his pocket watch" interjection
+  removed.** The bookend epigraph + closing tap-tap-tap remain;
+  the mid-Demo break-the-fourth-wall sentence was the most
+  likely line to make a stranger bounce.
+- **`--help` was missing `eval-api` and `export-seed`.** Added.
+- **`HINDCAST_SKIP` env var doc** clarified to mention it skips
+  injection too, not only recording.
+- **`CONTRIBUTING.md` ground rule** softened from "no network
+  calls, ever" (which contradicted eval-api) to "no network in
+  hooks or predictor paths" with eval-api carved out.
+- **README badges added** — CI, Go Report Card, MIT license.
+  Matches the maintainer's other public Go repos.
+
 ## [0.6.6] — 2026-05-01 — subprocess auto-tune + tuned threshold wired + OSS infra
 
 ### Headline

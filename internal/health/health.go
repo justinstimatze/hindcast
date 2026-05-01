@@ -100,11 +100,38 @@ func (h *Health) Save() error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0600); err != nil {
+	// Use os.CreateTemp's random-suffix temp filename so concurrent
+	// _autotune-worker subprocesses don't race on a shared `.tmp`
+	// path — without this, two overlapping retunes can have one's
+	// rename ENOENT-fail because the other's rename already moved
+	// the temp into place. CreateTemp gives each writer a unique
+	// name; first to rename wins, second silently retries (Rename
+	// is atomic on Linux/macOS).
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".health-*.json")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() {
+		tmp.Close()
+		os.Remove(tmpName)
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		cleanup()
+		return err
+	}
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // Load reads the persisted health, returning nil + error if absent.

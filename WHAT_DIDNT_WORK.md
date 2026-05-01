@@ -17,7 +17,7 @@ _Numbers below are from specific experiment snapshots during development and may
 
 **Status:** Replaced in v0.2 by status-line-only (predictor surfaces to the human, never to Claude). Then re-introduced in v0.6 with anchoring guards (tier gate, variance gate, P10/P90 wider band on uncertain cases).
 
-### Status line as the only surface (v0.2 – v0.5, 2026-04-23 – 2026-04-29)
+### Status line as the only surface (v0.2 – v0.5, 2026-04-23 – 2026-04-26)
 **Tried:** Predictor writes a one-line `hindcast: ~3m wall / 45s active [1m–6m] · knn sim=0.42 n=5 · refactor` to a file the Claude Code statusLine reads. The human sees it; Claude doesn't.
 
 **Expected:** No anchoring, calibrated number for the user, no harm to Claude's natural estimation behavior.
@@ -88,7 +88,7 @@ _Numbers below are from specific experiment snapshots during development and may
 
 **Status:** v0.6.6 detaches auto-tune to a `_autotune-worker` subprocess (same pattern `recordWorker` itself uses). The subprocess outlives the Stop hook's lifetime and finishes its writes independently.
 
-### Synchronous auto-tune as the fix (v0.6.5, 2026-04-30)
+### Synchronous auto-tune as the fix (v0.6.5, 2026-05-01)
 **Tried:** Replace `go func() { ... }()` with `func() { ... }()` so the tune runs inside the worker timeout, theoretically bounded.
 
 **Result:** Reduced overlap with concurrent Stop hooks but didn't eliminate the kill-mid-rename hazard — `recordWorker`'s `select`-on-timeout fires `return` from the worker, OS kills the process, mid-rename gob write dies anyway.

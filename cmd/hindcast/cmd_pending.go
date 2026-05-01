@@ -159,10 +159,11 @@ func cmdPending() {
 //     ladder by ≥15% on the user's held-out split). This means a specific
 //     prompt could still be off; the variance gate is the per-prediction
 //     backstop.
-//   - knn: predictor's hardcoded `knnMinSim = 0.15` floor admits the
-//     match; per-user tuned threshold (health.json) is reporting-only
-//     in v0.6.5, not a hard gate. The variance gate is the active
-//     per-prediction backstop here.
+//   - knn: per-user tuned threshold (health.json) is wired into
+//     predict.Predict via the minSim parameter as of v0.6.6 — the
+//     hardcoded knnMinSim = 0.15 acts as the floor when health is
+//     unset, and the variance gate is the additional per-prediction
+//     backstop above that.
 //   - bucket / project: no per-prediction gate; rely on n ≥ 4 floor in
 //     the predictor and the variance gate here.
 func formatClaudeInjection(p predict.Prediction) string {

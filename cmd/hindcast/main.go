@@ -14,7 +14,7 @@ import (
 	"github.com/justinstimatze/hindcast/internal/hook"
 )
 
-const version = "0.6.6"
+const version = "0.6.7"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -107,6 +107,8 @@ Usage:
   hindcast show --health         Display tuned predictor state.
   hindcast calibrate             Online A/B analysis (control vs treatment, legacy).
   hindcast predict [PROMPT]      One-shot kNN prediction for a prompt (CLI).
+  hindcast eval-api [-n N]       Offline A/B against the Claude API (control vs treatment).
+  hindcast export-seed           Dump the global sketch as JSON (maintainer tooling).
 
 Hooks (invoked by Claude Code; not for manual use):
   hindcast pending               UserPromptSubmit — record turn start + BM25 delivery.
